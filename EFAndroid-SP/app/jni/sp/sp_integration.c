@@ -445,6 +445,7 @@ void SPR_GetLatestCmd(int* angles, signed char* fwd, signed char* side, signed c
 #include "../efcode/client/snd_public.h"
 int  SPR_S_RegisterSound(const char* name){ return (int)S_RegisterSound(name, qfalse); }
 void SPR_S_StartSound(const float* origin, int entnum, int entchannel, int sfx){ S_StartSound((vec_t*)origin, entnum, entchannel, (sfxHandle_t)sfx); }
+void SPR_S_StartSoundVol(const float* origin, int entnum, int entchannel, int sfx, int volume){ S_StartSoundVolume((vec_t*)origin, entnum, entchannel, (sfxHandle_t)sfx, volume); }
 void SPR_S_StartLocalSound(int sfx, int channel){ S_StartLocalSound((sfxHandle_t)sfx, channel); }
 void SPR_S_ClearLoopingSounds(void){ S_ClearLoopingSounds(qtrue); }
 void SPR_S_AddLoopingSound(int entnum, const float* origin, const float* velocity, int sfx){ S_AddLoopingSound(entnum, origin, velocity, (sfxHandle_t)sfx); }

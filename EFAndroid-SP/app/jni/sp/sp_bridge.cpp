@@ -624,6 +624,186 @@ static void SP_CgameConsoleCmd(void){
     if(g_vmMain && g_vmMain(CG_CONSOLE_COMMAND, 0,0,0)) return;
     if(ge && g_spActive) ge->ClientCommand(0);
 }
+
+// ---------------------------------------------------------------------------
+// AS_* ambient-sound-set system (sound/sound.txt). In retail these are ENGINE
+// traps (retail: AS_ParseFile retail, S_UpdateAmbientSet retail,
+// AS_AddLocalSet retail, AS_GetBModelSound retail). The SP port
+// replaced the engine, so they live here. Previously stubbed (return 0/-1) ->
+// every map's ambient bed + randomized atmosphere was SILENT. Grammar is a flat
+// sequence of blocks (3 set types):
+//   <generalSet|localSet|bmodelSet> "<name>" { <keywords> }
+//   loopedWave <f>            -> registers sound/<f>.wav        (looping bed)
+//   subWaves   <pre> <n>...   -> registers sound/<pre>/<n>.wav  (random one-shots)
+//   volRange   <min> <max>    (0..255; advisory, see note)
+//   radius     <n>            (engine spatializes by distance already; advisory)
+//   timeBetweenWaves <min> <max>  seconds between random subwaves
+// Defaults match retail: tbw 10/25 s, volRange 255/255, radius 250. The looped
+// bed is anchored on ENTITYNUM_NONE (MAX_GENTITIES-1) — a sentinel the cgame
+// never uses for a real entity's loopSound, so it can't collide. Re-added every
+// frame because loops are cleared per frame (CG_S_CLEARLOOPINGSOUNDS).
+// ---------------------------------------------------------------------------
+#define AS_MAX_SETS      512
+#define AS_MAX_SUBWAVES  9
+struct as_set_t {
+    char name[64];
+    int  type;                       // 0 general, 1 local, 2 bmodel
+    int  tbwMin, tbwMax;             // seconds
+    int  volMin, volMax;             // 0..255
+    int  radius;
+    int  looped;                     // sfxHandle, 0 = none
+    int  subWaves[AS_MAX_SUBWAVES];
+    int  numSubWaves;
+    int  nextWave;                   // realtime ms of next general-set subwave
+};
+static as_set_t s_asSets[AS_MAX_SETS];
+static int      s_asNumSets = 0;
+static const float s_asZero[3] = {0,0,0};
+
+// Local string helpers — the engine's q_shared funcs are C-linkage and not visible to this C++ TU.
+static int  AS_lc(int c){ return (c>='A'&&c<='Z') ? c+32 : c; }
+static int  AS_stricmp(const char* a, const char* b){
+    for(;;){ int ca=AS_lc((unsigned char)*a), cb=AS_lc((unsigned char)*b); if(ca!=cb) return ca-cb; if(!ca) return 0; a++; b++; }
+}
+static void AS_strcpy(char* d, const char* s, int n){ if(n<=0) return; int i=0; for(; i<n-1 && s[i]; i++) d[i]=s[i]; d[i]=0; }
+// Self-contained tokenizer (avoids C/C++ linkage mismatch vs the engine's C COM_Parse).
+// allowNL=false returns "" at end of line (for the subWaves "<prefix> <name>... EOL" grammar).
+// Handles // and /* */ comments, "quoted" set names, and standalone { } tokens.
+static char* AS_Tok(char** dp, bool allowNL){
+    static char tok[256];
+    char* p = *dp; tok[0] = 0;
+    if(!p){ return tok; }
+    for(;;){
+        while(*p && (unsigned char)*p <= ' '){
+            if(*p=='\n' && !allowNL){ *dp=p; return tok; }
+            p++;
+        }
+        if(!*p){ *dp=p; return tok; }
+        if(p[0]=='/' && p[1]=='/'){ while(*p && *p!='\n') p++; continue; }
+        if(p[0]=='/' && p[1]=='*'){ p+=2; while(*p && !(p[0]=='*'&&p[1]=='/')) p++; if(*p) p+=2; continue; }
+        break;
+    }
+    int n=0;
+    if(*p=='"'){
+        p++;
+        while(*p && *p!='"'){ if(n<255) tok[n++]=*p; p++; }
+        if(*p=='"') p++;
+    } else if(*p=='{' || *p=='}'){
+        tok[n++]=*p++;
+    } else {
+        while(*p && (unsigned char)*p > ' ' && *p!='{' && *p!='}' && *p!='"'){ if(n<255) tok[n++]=*p; p++; }
+    }
+    tok[n]=0; *dp=p; return tok;
+}
+static as_set_t* AS_FindSet(const char* name){
+    if(!name || !name[0]) return NULL;
+    for(int i=0;i<s_asNumSets;i++)
+        if(!AS_stricmp(s_asSets[i].name, name)) return &s_asSets[i];
+    return NULL;
+}
+static int AS_RandInterval(const as_set_t* s){
+    int span = s->tbwMax - s->tbwMin;
+    int secs = s->tbwMin + (span>0 ? (rand()%(span+1)) : 0);
+    return secs*1000;
+}
+static int AS_RandVolume(const as_set_t* s){   // 0-255; retail picks a random subwave volume in [volMin,volMax]
+    int span = s->volMax - s->volMin;
+    return s->volMin + (span>0 ? (rand()%(span+1)) : 0);
+}
+static void SP_AS_ParseSets(void){
+    s_asNumSets = 0;
+    void* buf = NULL;
+    int len = (int)FS_ReadFile("sound/sound.txt", &buf);
+    if(len <= 0 || !buf){
+        blog("AS_ParseSets: ^1Couldn't load ambient sound sets from sound/sound.txt\n");
+        return;
+    }
+    char* p = (char*)buf;
+    for(;;){
+        const char* tok = AS_Tok(&p,true);
+        if(!tok[0]) break;                               // EOF
+        int type = -1;
+        if(!AS_stricmp(tok,"generalSet"))     type = 0;
+        else if(!AS_stricmp(tok,"localSet"))  type = 1;
+        else if(!AS_stricmp(tok,"bmodelSet")) type = 2;
+        if(type < 0) continue;                           // skip stray token
+        char setName[64];
+        AS_strcpy(setName, AS_Tok(&p,true), sizeof(setName));
+        if(AS_Tok(&p,true)[0] != '{') continue;            // expect '{'
+        if(AS_FindSet(setName) || s_asNumSets >= AS_MAX_SETS){
+            int depth = 1;                               // dup/full: consume the block
+            while(depth){ const char* t=AS_Tok(&p,true); if(!t[0])break; if(t[0]=='{')depth++; else if(t[0]=='}')depth--; }
+            continue;
+        }
+        as_set_t* s = &s_asSets[s_asNumSets++];
+        memset(s, 0, sizeof(*s));
+        AS_strcpy(s->name, setName, sizeof(s->name));
+        s->type=type; s->tbwMin=10; s->tbwMax=25; s->volMin=255; s->volMax=255; s->radius=250;
+        for(;;){
+            tok = AS_Tok(&p,true);
+            if(!tok[0] || tok[0]=='}') break;
+            if(!AS_stricmp(tok,"loopedWave")){
+                char path[256]; snprintf(path,sizeof(path),"sound/%s.wav",AS_Tok(&p,true));
+                s->looped = SPR_S_RegisterSound(path);
+                if(s->looped < 1) blog("AS_ParseSets: ^3Unable to load ambient sound \"%s\"\n", path);
+            } else if(!AS_stricmp(tok,"subWaves")){
+                char prefix[128]; AS_strcpy(prefix, AS_Tok(&p,false), sizeof(prefix));
+                const char* wn;
+                while((wn=AS_Tok(&p,false))[0]){
+                    if(s->numSubWaves >= AS_MAX_SUBWAVES){ blog("AS_ParseSets: ^3Too many subwaves on set \"%s\"\n", s->name); break; }
+                    char path[256]; snprintf(path,sizeof(path),"sound/%s/%s.wav",prefix,wn);
+                    s->subWaves[s->numSubWaves++] = SPR_S_RegisterSound(path);
+                }
+            } else if(!AS_stricmp(tok,"volRange")){
+                s->volMin = atoi(AS_Tok(&p,false)); s->volMax = atoi(AS_Tok(&p,false));
+                if(s->volMin > s->volMax){ int t=s->volMin; s->volMin=s->volMax; s->volMax=t; }
+            } else if(!AS_stricmp(tok,"timeBetweenWaves")){
+                s->tbwMin = atoi(AS_Tok(&p,false)); s->tbwMax = atoi(AS_Tok(&p,false));
+                if(s->tbwMin > s->tbwMax){ int t=s->tbwMin; s->tbwMin=s->tbwMax; s->tbwMax=t; }
+            } else if(!AS_stricmp(tok,"radius")){
+                s->radius = atoi(AS_Tok(&p,false));
+            } else {
+                blog("AS_ParseSets: ^3Unknown ambient set keyword \"%s\"\n", tok);
+            }
+        }
+    }
+    FS_FreeFile(buf);
+    blog("AS_ParseFile: Parsed %d ambient set(s)\n", s_asNumSets);
+}
+static void SP_AS_UpdateAmbientSet(const char* name, const float* origin){
+    as_set_t* s = AS_FindSet(name);
+    if(!s) return;
+    if(s->looped > 0)
+        SPR_S_AddLoopingSound(MAX_GENTITIES-1, origin, s_asZero, s->looped);   // bed on ENTITYNUM_NONE
+    if(s->numSubWaves > 0){
+        int now = Sys_Milliseconds();
+        if(s->nextWave == 0)        s->nextWave = now + AS_RandInterval(s);     // delay first blip
+        else if(now >= s->nextWave){
+            int h = s->subWaves[rand()%s->numSubWaves];
+            if(h > 0) SPR_S_StartSoundVol(NULL, 0, 0 /*CHAN_AUTO*/, h, AS_RandVolume(s));   // non-positional, volRange
+            s->nextWave = now + AS_RandInterval(s);
+        }
+    }
+}
+static int SP_AS_AddLocalSet(const char* name, const float* origin, int entID, int setTime){
+    int now = Sys_Milliseconds();
+    as_set_t* s = AS_FindSet(name);
+    if(!s) return now;                                                          // retail: "retry next frame"
+    if(s->looped > 0 && entID>=0 && entID<MAX_GENTITIES)
+        SPR_S_AddLoopingSound(entID, origin, s_asZero, s->looped);
+    if(s->numSubWaves > 0 && now >= setTime){
+        int h = s->subWaves[rand()%s->numSubWaves];
+        if(h > 0) SPR_S_StartSoundVol(origin, entID, 0 /*CHAN_AUTO*/, h, AS_RandVolume(s));   // positional, volRange
+        return now + AS_RandInterval(s);
+    }
+    return setTime;
+}
+static int SP_AS_GetBModelSound(const char* name, int stage){
+    as_set_t* s = AS_FindSet(name);
+    if(s && stage>=0 && stage < s->numSubWaves && s->subWaves[stage] > 0) return s->subWaves[stage];
+    return -1;                                                                  // sentinel: no sound (door early-out; never a stale 0 handle)
+}
+
 static intptr_t SP_CgameSyscall( intptr_t cmd, ... ){
     intptr_t args[16]; va_list ap; va_start(ap,cmd);
     for(int i=0;i<16;i++) args[i]=va_arg(ap,intptr_t);
@@ -740,13 +920,16 @@ static intptr_t SP_CgameSyscall( intptr_t cmd, ... ){
     case CG_S_STARTBACKGROUNDTRACK: SPR_S_StartBackgroundTrack((const char*)P(0),(const char*)P(1)); return 0;
     // force-feedback (DirectInput joystick rumble; irrelevant on Android) -> no-op
     case CG_FF_STARTFX: case CG_FF_ENSUREFX: case CG_FF_STOPFX: case CG_FF_STOPALLFX: return 0;
-    // ambient-sound sets: full AS_* subsystem (sound.txt sets) not yet ported -> atmosphere-only stubs (silent).
-    case CG_AS_PARSESETS: case CG_AS_ADDENTRY: case CG_S_UPDATEAMBIENTSET:
-    case CG_S_ADDLOCALSET: return 0;
-    // CG_AS_GETBMODELSOUND must return -1 ("no sound"), NOT 0: g_mover.cpp G_PlayDoorSound only early-outs on
-    // -1, so returning 0 makes every door open/close fire G_AddEvent(EV_BMODEL_SOUND, 0) (a bogus sfx-handle-0
-    // sound event). Retail AS_GetBModelSound (stvoy retail) returns -1 on miss. (See hm_harvest/ + Step 21.)
-    case CG_AS_GETBMODELSOUND: return -1;
+    // ambient-sound sets: real AS_* subsystem (sound/sound.txt), ported from retail retail (see above).
+    case CG_AS_PARSESETS:         SP_AS_ParseSets(); return 0;
+    case CG_AS_ADDENTRY:          return 0;   // precache filter; ParseSets already registers every set's sounds
+    case CG_S_UPDATEAMBIENTSET:   SP_AS_UpdateAmbientSet((const char*)P(0),(const float*)P(1)); return 0;
+    // args: 0=name 1=listener_origin 2=origin 3=entID 4=time (listener unused; engine spatializes by origin)
+    case CG_S_ADDLOCALSET:        return SP_AS_AddLocalSet((const char*)P(0),(const float*)P(2),(int)A(3),(int)A(4));
+    // CG_AS_GETBMODELSOUND returns the bmodelSet subwave handle for the given stage, or -1 ("no sound") on miss.
+    // -1 (NOT 0) is required: g_mover.cpp G_PlayDoorSound only early-outs on -1; returning 0 would fire
+    // G_AddEvent(EV_BMODEL_SOUND, 0) (bogus sfx-handle-0) on every door. Retail: stvoy retail.
+    case CG_AS_GETBMODELSOUND: return SP_AS_GetBModelSound((const char*)P(0),(int)A(1));
     case CG_R_DRAWSCREENSHOT: return 0;   // loading-screen savegame thumbnail; re has no capture -> cosmetic
     default: return 0;
     }
@@ -766,6 +949,12 @@ static int  g_transHub = 0;
 // what makes ClientSpawn run Player_RestoreFromPrevLevel to carry the loadout). We hardcoded eFULL for
 // both. Track which path we're on: 1 = forward transition (eAUTO), else the loaded GAME flag.
 static int  g_transGameFlag = 0;
+// Distinguishes the two eAUTO (g_transGameFlag!=0) paths into SP_FinishTransition, which need OPPOSITE level
+// handling: an eAUTO autosave LOAD (death-respawn / `load auto`, set by SP_LoadGameFile) must ge->ReadLevel(qtrue)
+// the saved entity-0/objectives/ICARUS; a FORWARD map transition (borg1->borg2, set by SP_MapTransition) must
+// DISCARD the snapshot (its __trans.sav holds the OLD map's full table, whose inline-model *N indices would
+// crash the new BSP) and carry the player via the playersave/* cvars. 1 = autosave load, 0 = forward transition.
+static int  g_transIsAutoLoad = 0;
 #define TRANS_SAV "saves/__trans.sav"
 
 // SP loading-screen gate (defined in sp_integration.c): hold the per-map levelshot over the
@@ -795,6 +984,7 @@ extern "C" void SP_MapTransition(const char* map, const char* spawn, int isHub){
     strncpy(g_transSpawn, spawn?spawn:"", sizeof(g_transSpawn)-1); g_transSpawn[sizeof(g_transSpawn)-1]=0;
     g_transHub = isHub;
     g_transGameFlag = 1;   // forward transition -> eAUTO (carry player loadout via Player_RestoreFromPrevLevel)
+    g_transIsAutoLoad = 0; // forward transition (NOT an autosave load) -> discard the old-map snapshot below
     char buf[160];
     if( SP_DropHM() ) snprintf(buf,sizeof(buf),"efsptrans\n");                      // Route b: SP_FinishTransition loads world+CM itself
     else              snprintf(buf,sizeof(buf),"spmap %s\nwait 250\nefsptrans\n", map);
@@ -880,8 +1070,20 @@ extern "C" qboolean SP_FinishTransition(void){
     // still restores the saved entities exactly as before.
     if( g_transGameFlag == 0 ){
         if(s_sgFile || SG_OpenRead(TRANS_SAV)){ s_sgWriting=qfalse; ge->ReadLevel(qfalse, g_transHub ? qtrue : qfalse); SG_Close(); }
+    } else if( g_transIsAutoLoad && s_sgFile ){
+        // eAUTO autosave LOAD (death-respawn `load *respawn`->auto, or loading a level-entry / genuine retail
+        // eAUTO save). The save holds ONLY entity 0 + objectives + ICARUS vars (WriteLevel(qtrue)), so
+        // ReadLevel(qtrue) restores those while EVERY other entity respawns FRESH from the BSP (ge->Init above)
+        // -> the spent opening script_runner is re-created and the opening cinematic re-fires (re-locking the
+        // player), fixing the eFULL free-walk bug (the spent script was restored, so the opening never re-fired).
+        // Reading only entity 0 also avoids the forward-transition inline-model crash -- an autosave has no
+        // old-map entity table. The
+        // player loadout was carried via the CVSV/AMMO/ADPT cvars (restored in SP_LoadGameFile) and is applied
+        // by Player_RestoreFromPrevLevel inside ge->ClientBegin(...,eAUTO) below (g_client.cpp:891-896).
+        s_sgWriting=qfalse; ge->ReadLevel(qtrue, qfalse); SG_Close();
+        blog("SP_FinishTransition: eAUTO autosave load -> ReadLevel(qtrue), entities respawn fresh\n");
     } else if( s_sgFile ){
-        SG_Close();   // forward transition: discard the level snapshot; the player carries via cvars
+        SG_Close();   // forward transition (eAUTO): discard the level snapshot; the player carries via cvars
     }
     memset(&g_lastcmd,0,sizeof(g_lastcmd)); g_lastcmd.serverTime = g_levelTime;
     ge->ClientBegin(0, &g_lastcmd, sg);
@@ -929,10 +1131,12 @@ extern "C" qboolean SP_FinishTransition(void){
     SP_EndLoad();   // new SP level is live -> stop drawing the transition load screen
     strncpy(g_curMap, g_transMap, sizeof(g_curMap)-1); g_curMap[sizeof(g_curMap)-1]=0;
     g_transMap[0] = 0;
-    // EF1 SP 1:1: a FORWARD transition (g_transGameFlag!=0, fresh spawn) is a new level entry -> write the
-    // level-start autosave so death-respawn has a checkpoint. A user LOAD (g_transGameFlag==0) must NOT
-    // re-write `auto` here -- that would clobber the player's own checkpoint with the just-loaded state.
-    if( g_transGameFlag != 0 ) SP_WriteEntryAutosave();
+    // EF1 SP 1:1: a FORWARD transition (g_transGameFlag!=0, g_transIsAutoLoad==0, fresh spawn) is a new level
+    // entry -> write the level-start eAUTO autosave so death-respawn has a checkpoint. Mirror retail's
+    // retail==0 guard (the entry autosave is written only when NO save was just loaded): an eAUTO autosave
+    // LOAD (death-respawn, g_transIsAutoLoad==1) must NOT rewrite `auto` -- that would overwrite the player's own
+    // checkpoint with the just-reloaded state. A user eFULL LOAD (g_transGameFlag==0) is already excluded.
+    if( g_transGameFlag != 0 && !g_transIsAutoLoad ) SP_WriteEntryAutosave();
     blog("SP_FinishTransition: done numEnt=%d ps.origin=(%.0f %.0f %.0f)\n",
          ge->num_entities, g_snap.ps.origin[0], g_snap.ps.origin[1], g_snap.ps.origin[2]);
     return qtrue;
@@ -942,8 +1146,46 @@ extern "C" qboolean SP_FinishTransition(void){
 extern "C" void SP_ClientCommand(void){ if(ge && g_spActive) ge->ClientCommand(0); }
 
 // ---- user save / load (Phase 2). Retail-byte-compatible framing chunks around ge->WriteLevel/ReadLevel.
-extern "C" void SP_SaveGame(const char* name){
+// Retail's save gate: SV_SaveGame (stvoy retail) calls SV_CanSave (retail), which
+// delegates the cutscene check to the game DLL's GameAllowedToSaveHere() (game_export +0x14 == !in_camera).
+// The port already ships that export (g_savegame.cpp:999) but never consulted it. Expose it for the UI
+// bridge (sp_ui_bridge.cpp) and the console-save backstop below. Returns true if no game is loaded.
+extern "C" qboolean SP_GameAllowedToSaveHere(void){
+    return (ge && ge->GameAllowedToSaveHere) ? ge->GameAllowedToSaveHere() : qtrue;
+}
+
+// Set when an AUTOSAVE was requested during a cutscene (in_camera): SP_DrawFrame writes it on the first
+// non-cinematic frame. See SP_SaveGame / the death-respawn-into-cutscene fix below.
+static int g_pendingAutosave = 0;
+
+// Internal save writer. bEAUTO selects retail SV_SaveGame's two flavours (stvoy retail/retail):
+//  - bEAUTO=qfalse -> eFULL: GAME=0 + ge->WriteLevel(qfalse) (full gclient + entity table). User saves and the
+//    mid-level target_autosave checkpoint (`save auto*`, retail gameFlag 0). On load the exact level is restored.
+//  - bEAUTO=qtrue  -> eAUTO: GAME=1 + ge->WriteLevel(qtrue) (entity 0 + objectives + ICARUS only) + the player
+//    carry chunks CVSV/AMMO/ADPT. The level-entry autosave (retail writes it with gameFlag 1, decomp 0x424f36).
+//    On load the level respawns FRESH from the BSP (the spent opening script_runner re-fires -> the cinematic
+//    re-locks the player) and the loadout is restored via Player_RestoreFromPrevLevel from the carry cvars.
+static void SP_SaveGameInternal(const char* name, qboolean bEAUTO){
     if(!ge || !g_spActive || !name || !name[0]){ blog("save: not in a game\n"); return; }
+    // Cutscene gate (retail SV_CanSave -> GameAllowedToSaveHere == !in_camera). Retail retail only checks
+    // it for gameFlag 0: `if ((param_2==0) && !SV_CanSave) return;`. So an eAUTO autosave (bEAUTO) is NEVER
+    // gated -- it writes immediately even during the opening cinematic, which is SAFE now that it is eAUTO:
+    // WriteLevel(qtrue) records no spent-script/in_camera entity state, and the load respawns fresh (the
+    // cutscene replays). Only eFULL saves honour the gate:
+    //  - MANUAL eFULL save during a cutscene: REFUSE (matches retail).
+    //  - eFULL "auto" (target_autosave checkpoint) during a cutscene: DEFER to the first non-cinematic frame.
+    qboolean isAuto = (strcmp(name,"auto") == 0) ? qtrue : qfalse;
+    if( !bEAUTO && ge->GameAllowedToSaveHere && !ge->GameAllowedToSaveHere() ){
+        if( isAuto ){
+            g_pendingAutosave = 1;
+            blog("save: eFULL autosave checkpoint DEFERRED (in cutscene) -> will write when in_camera clears\n");
+        } else {
+            SP_ComPrintf()("^1Cannot save during a cutscene.\n");   // engine console (Com_Printf is C-linkage; route via the shim)
+            blog("save: manual save blocked during cutscene -- matches retail SV_CanSave\n");
+        }
+        return;
+    }
+    if( isAuto ) g_pendingAutosave = 0;   // writing an autosave now satisfies any pending deferral
     if(!SG_OpenWrite("saves/current.sav")){ blog("save: open failed\n"); return; }
     static unsigned char shot[256*256*4];      // SHOT thumbnail: 256x256 RGBA, bottom-up (retail 0x40000-byte chunk)
     char comm[128], mpcm[1024]; int zero=0, tnow=g_levelTime;
@@ -991,7 +1233,20 @@ extern "C" void SP_SaveGame(const char* name){
             I_Append('VALU', vl, (int)strlen(vl)+1);
         }
     }
-    I_Append('GAME', &zero, 4); I_Append('TIME', &tnow, 4);
+    int gameFlag = bEAUTO ? 1 : 0;
+    I_Append('GAME', &gameFlag, 4);
+    // eAUTO carry (retail retail, written ONLY when gameFlag!=0): persist the engine carry-cvars the
+    // game's Player_RestoreFromPrevLevel reads on the fresh respawn. The cvar names MUST match the game exactly
+    // -- "playersave"/"playerammo%d"/"borgadapt%d", NO underscore (g_client.cpp:698/712/719). Written right
+    // after GAME so SP_LoadGameFile's game!=0 branch consumes them in the SAME order (the stream stays framed).
+    // eFULL saves write none of these -> their load (game==0) reads none -> existing saves are unaffected.
+    if( bEAUTO ){
+        char cv[1024];
+        cv[0]=0; Cvar_VariableStringBuffer("playersave", cv, sizeof(cv)); I_Append('CVSV', cv, (int)strlen(cv)+1);
+        for(int i=0;i<4;i++){  char nm[32]; snprintf(nm,sizeof(nm),"playerammo%d",i); cv[0]=0; Cvar_VariableStringBuffer(nm,cv,sizeof(cv)); I_Append('AMMO', cv, (int)strlen(cv)+1); }
+        for(int i=0;i<32;i++){ char nm[32]; snprintf(nm,sizeof(nm),"borgadapt%d",i); cv[0]=0; Cvar_VariableStringBuffer(nm,cv,sizeof(cv)); I_Append('ADPT', cv, (int)strlen(cv)+1); }
+    }
+    I_Append('TIME', &tnow, 4);
     I_Append('TIMR', &zero, 4);
     // PRTS: retail emits a particle/precip grid chunk here, between TIMR and CSCN (stvoy retail). The port
     // doesn't simulate that grid (particles reseed on spawn), but write a zero PRTS so the chunk stream is
@@ -1011,12 +1266,17 @@ extern "C" void SP_SaveGame(const char* name){
           I_Append('CSIN', &i, 4);
           I_Append('CSDA', g_configstrings[i], (int)strlen(g_configstrings[i])+1);
       } }
-    ge->WriteLevel(qfalse);                    // game-DLL chunks: gclient/objectives/ICARUS/entities/DONE
+    ge->WriteLevel(bEAUTO);                     // eFULL(qfalse): gclient + full entity table; eAUTO(qtrue): entity 0 + objectives/ICARUS only
     SG_Close();
     char to[96]; snprintf(to,sizeof(to),"saves/%s.sav", name);
     FS_Rename("saves/current.sav", to);
-    blog("save: wrote %s (map %s, t=%d)\n", to, g_curMap, tnow);
+    blog("save: wrote %s (map %s, t=%d, %s)\n", to, g_curMap, tnow, bEAUTO ? "eAUTO" : "eFULL");
 }
+
+// Public save entry (the `save` console command, deferred-autosave writer, quick-save): always eFULL, exactly
+// like retail's `save`/`wipe` command path (gameFlag 0). The eAUTO level-entry autosave goes through
+// SP_SaveGameInternal(...,qtrue) from SP_WriteEntryAutosave only.
+extern "C" void SP_SaveGame(const char* name){ SP_SaveGameInternal(name, qfalse); }
 
 // EF1 SP 1:1: retail writes an `auto` autosave on every FRESH (non-loaded) level entry, right after the
 // first ClientBegin (stvoy SV spawn path), so the death-screen respawn (`load *respawn` -> load `auto`,
@@ -1024,11 +1284,16 @@ extern "C" void SP_SaveGame(const char* name){
 // target_autosave. Holodeck/_brig (`_`-prefixed) maps are skipped, exactly like retail (respawn() spawns
 // in place there). Called from the fresh-spawn paths only (New Game, forward transition) -- NEVER on a user
 // load, which would clobber the player's own checkpoint with the just-loaded state.
+static void SP_SaveGameInternal(const char* name, qboolean bEAUTO);   // fwd
 static void SP_WriteEntryAutosave(void){
     if( !g_spActive ) return;
     if( g_curMap[0] == '_' ) return;        // _holo*/_brig: no entry autosave (respawn() spawns in place)
-    SP_SaveGame("auto");
-    blog("SP_WriteEntryAutosave: wrote level-entry autosave for %s\n", g_curMap);
+    // Retail writes the level-entry "auto" with gameFlag 1 = eAUTO (stvoy decomp 0x424f36: retail("auto",1)
+    // on a fresh non-'_' map entry, retail==0). eAUTO is what makes the death-respawn `load *respawn`
+    // re-spawn the level FRESH (opening cinematic re-fires + re-locks the player) instead of restoring the
+    // spent opening script_runner (the eFULL free-walk bug, where the cinematic resumed but the player was free).
+    SP_SaveGameInternal("auto", qtrue);
+    blog("SP_WriteEntryAutosave: wrote eAUTO level-entry autosave for %s\n", g_curMap);
 }
 
 extern "C" void SP_LoadGameFile(const char* name){
@@ -1067,9 +1332,15 @@ extern "C" void SP_LoadGameFile(const char* name){
     // stays framed and the carry state restores. Port-written saves are always eFULL (GAME==0), so this is only
     // exercised when loading a genuine retail transition autosave.
     if(game!=0){
-        char cvsv[1024]; cvsv[0]=0; I_ReadSG('CVSV', cvsv,1024,0); cvsv[sizeof(cvsv)-1]=0; Cvar_Set("playersave", cvsv);
-        for(int i=0;i<4;i++){  char a[512]; a[0]=0; I_ReadSG('AMMO', a,0,0); a[sizeof(a)-1]=0; char nm[32]; snprintf(nm,sizeof(nm),"playerammo_%d",i); Cvar_Set(nm,a); }
-        for(int i=0;i<32;i++){ char d[512]; d[0]=0; I_ReadSG('ADPT', d,0,0); d[sizeof(d)-1]=0; char nm[32]; snprintf(nm,sizeof(nm),"borgadapt_%d",i); Cvar_Set(nm,d); }
+        // Restore the eAUTO carry cvars the game's Player_RestoreFromPrevLevel reads on the fresh respawn.
+        // The cvar names MUST match the game EXACTLY -- "playerammo%d"/"borgadapt%d" with NO underscore
+        // (g_client.cpp:662/669; retail efgame strings 200ce008/200cdffc). The earlier "playerammo_%d"/
+        // "borgadapt_%d" set cvars the game never reads -> ammo/borg-adapt silently never restored. (Only ever
+        // reachable for game!=0, i.e. eAUTO saves; eFULL saves skip this whole block, so older saves are
+        // unaffected.) CVSV read len 0 = take the stored size (the write side is strlen+1).
+        char cvsv[1024]; cvsv[0]=0; I_ReadSG('CVSV', cvsv,0,0); cvsv[sizeof(cvsv)-1]=0; Cvar_Set("playersave", cvsv);
+        for(int i=0;i<4;i++){  char a[512]; a[0]=0; I_ReadSG('AMMO', a,0,0); a[sizeof(a)-1]=0; char nm[32]; snprintf(nm,sizeof(nm),"playerammo%d",i); Cvar_Set(nm,a); }
+        for(int i=0;i<32;i++){ char d[512]; d[0]=0; I_ReadSG('ADPT', d,0,0); d[sizeof(d)-1]=0; char nm[32]; snprintf(nm,sizeof(nm),"borgadapt%d",i); Cvar_Set(nm,d); }
     }
     I_ReadSG('TIME',&tnow,4,0); I_ReadSG('TIMR',&timr,4,0);
     { void* pr=0; if(I_ReadSGOpt('PRTS',0,0,&pr)>0 && pr) free(pr); }   // L-1: consume retail's particle-grid chunk if present
@@ -1093,6 +1364,7 @@ extern "C" void SP_LoadGameFile(const char* name){
     strncpy(g_transMap, mpcm, sizeof(g_transMap)-1); g_transMap[sizeof(g_transMap)-1]=0;
     g_transSpawn[0]=0; g_transHub=0; g_levelTime = tnow;
     g_transGameFlag = game;   // (GAME!=0)+1 -> eAUTO for transition-saves, eFULL for normal user saves (GAME=0)
+    g_transIsAutoLoad = (game != 0) ? 1 : 0;   // an eAUTO LOAD (vs forward transition): ReadLevel(qtrue) below
     SP_BeginLoad(mpcm);   // levelshot of the save's map over the reload window
     char buf[160];
     if( SP_DropHM() ) snprintf(buf,sizeof(buf),"efsptrans\n");                       // Route b: no HM spmap
@@ -1119,6 +1391,16 @@ static void SP_FillGlConfig(void){
 
 extern "C" qboolean SP_StartClient(void){
     if(!ge||!g_vmMain){ blog("SP_StartClient: no game/cgame\n"); return qfalse; }
+    // New Game is a FRESH start with NO carried-in loadout. Clear the cross-level carry cvars
+    // (playersave/playerammo%d/borgadapt%d) that a prior same-session playthrough's forward transitions left set
+    // (they are non-archived, so a cold app launch already has them empty -- this covers play->menu->New Game).
+    // Otherwise the eAUTO level-entry autosave written below would serialize that STALE loadout into its
+    // CVSV/AMMO/ADPT chunks, and a death-respawn on this New Game would restore the previous game's weapons/health.
+    // Empty carry -> Player_RestoreFromPrevLevel no-ops (it gates on strlen(playersave)) -> the default ClientSpawn
+    // loadout, which is the correct New-Game respawn. Forward transitions/loads set these elsewhere and are unaffected.
+    Cvar_Set("playersave", "");
+    for(int i=0;i<4;i++){  char nm[32]; snprintf(nm,sizeof(nm),"playerammo%d",i); Cvar_Set(nm,""); }
+    for(int i=0;i<32;i++){ char nm[32]; snprintf(nm,sizeof(nm),"borgadapt%d",i); Cvar_Set(nm,""); }
     SP_FillGlConfig();   // glconfig (vidWidth/Height) for the cgame's CG_CalcVrect — see SP_FillGlConfig
     BuildGameState();
     // connect + spawn the single player
@@ -1272,6 +1554,15 @@ extern "C" void SP_DrawFrame(int serverTime, int stereo){
         ge->ClientThink(0, &g_lastcmd);
         SP_UpdateVoiceOverride(); ge->RunFrame(g_levelTime);
         BuildSnapshot();
+    }
+
+    // Deferred autosave: an autosave requested during a cutscene (in_camera) was held back by SP_SaveGame so it
+    // wouldn't capture mid-cinematic state. Write it now that the cutscene has ended, so the death-respawn
+    // checkpoint is a clean post-cinematic state instead of one that reloads with the player free-walking the
+    // scene. Runs only on active (unpaused) gameplay frames; GameAllowedToSaveHere() == !in_camera.
+    if( g_pendingAutosave && ge && g_spActive && (!ge->GameAllowedToSaveHere || ge->GameAllowedToSaveHere()) ){
+        blog("save: writing DEFERRED autosave now that the cutscene has ended\n");
+        SP_SaveGame("auto");   // clears g_pendingAutosave on the allowed-save path
     }
 
     // ONE cgame draw per RENDER frame (decoupled from the sim). cg.time advances SMOOTHLY per render frame by

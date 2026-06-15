@@ -223,7 +223,7 @@ void GamepadLookCallback( void *s, int notification )
 
 	if (notification != QM_ACTIVATED)
 		return;
-	ui.Cvar_SetValue( "gp_lookSens", slider->curvalue );
+	ui.Cvar_SetValue( "gp_lookSens", 0.25f + ( slider->curvalue - 1.0f ) * 0.25f );	// notch 1..10 -> cvar 0.25..2.5
 }
 
 

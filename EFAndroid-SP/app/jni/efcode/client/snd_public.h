@@ -26,6 +26,8 @@ void S_Shutdown( void );
 
 // if origin is NULL, the sound will be dynamically sourced from the entity
 void S_StartSound( vec3_t origin, int entnum, int entchannel, sfxHandle_t sfx );
+// like S_StartSound but at an explicit volume (0-255 full-scale); origin==NULL = non-attenuated
+void S_StartSoundVolume( vec3_t origin, int entnum, int entchannel, sfxHandle_t sfx, int volume );
 void S_StartLocalSound( sfxHandle_t sfx, int channelNum );
 
 void S_StartBackgroundTrack( const char *intro, const char *loop );

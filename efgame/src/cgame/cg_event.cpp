@@ -299,7 +299,11 @@ void CG_EntityEvent( centity_t *cent, vec3_t position ) {
 				break;
 			}
 			item = &bg_itemlist[ index ];
-			cgi_S_StartSound (NULL, es->number, CHAN_AUTO,	cgi_S_RegisterSound( item->pickup_sound ) );
+			// Guard a data-driven empty pickup_sound: an item whose .dat pickupsound token is "" reaches
+			// S_RegisterSound("") -> engine "WARNING: Sound name is empty" + a silent (handle-0) pickup.
+			// Retail items always carry PICKUPSOUND ("sound/weapons/w_pkup.wav"); only register/play if set.
+			if ( item->pickup_sound && item->pickup_sound[0] )
+				cgi_S_StartSound (NULL, es->number, CHAN_AUTO,	cgi_S_RegisterSound( item->pickup_sound ) );
 
 			// show icon and name on status bar
 			if ( es->number == cg.snap->ps.clientNum ) {

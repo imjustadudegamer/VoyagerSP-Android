@@ -89,6 +89,23 @@ void S_StartSound( vec3_t origin, int entnum, int entchannel, sfxHandle_t sfx )
 
 /*
 =================
+S_StartSoundVolume
+
+Start a sound at an explicit volume (0-255 full-scale). Falls back to a normal
+full-volume start if the backend has no volume variant (e.g. OpenAL).
+=================
+*/
+void S_StartSoundVolume( vec3_t origin, int entnum, int entchannel, sfxHandle_t sfx, int volume )
+{
+	if( si.StartSoundVolume ) {
+		si.StartSoundVolume( origin, entnum, entchannel, sfx, volume );
+	} else if( si.StartSound ) {
+		si.StartSound( origin, entnum, entchannel, sfx );
+	}
+}
+
+/*
+=================
 S_StartLocalSound
 =================
 */

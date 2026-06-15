@@ -459,7 +459,10 @@ static void IT_PickupSound(char **holdBuf)
 		gi.Printf("WARNING: Pickup Sound too long in external ITEMS.DAT '%s'\n", tokenStr);
 	}
 
-	bg_itemlist[itemParms.itemNum].pickup_sound = G_NewString(tokenStr);
+	// Only override the compile-time default (PICKUPSOUND, bg_misc.cpp) if the .dat actually names a sound.
+	// An empty pickupsound token would otherwise store "" -> S_RegisterSound("") warning + silent pickup.
+	if (tokenStr[0])
+		bg_itemlist[itemParms.itemNum].pickup_sound = G_NewString(tokenStr);
 }
 
 static void IT_ParseWeaponParms(char **holdBuf)

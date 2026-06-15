@@ -1994,7 +1994,8 @@ static void UI_ParseButtonText()
 	}
 	if (i != MBT_MAX)
 	{
-		Com_Printf( S_COLOR_RED "UI_ParseButtonText : not enough values!\n");
+		// fewer pairs than the enum: back-fill silently (the only shortfall is the port-appended
+		// MBT_GAMEPADLOOK, which is assigned in C at ui_controls2.cpp; was a red console error).
 		for(;i<MBT_MAX;i++) {
 			menu_button_text[i][0] = "?";
 			menu_button_text[i][1] = "?";
@@ -2066,7 +2067,9 @@ static void UI_ParseMenuText()
 		{
 			if (i == MNT_MAX)
 			{
-				Com_Printf( S_COLOR_RED "UI_ParseMenuText : too many lines!\n");
+				// sp_normaltext.dat ships more strings than MNT_MAX (true in retail too); benign --
+				// every slot the UI references is already filled. Stop silently (was a S_COLOR_RED
+				// "too many lines!" console error that looked like a real parse failure to users).
 				return;
 			}
 			menu_normal_text[i] = (holdBuffer + 1);	// The +1 is to get rid of the " at the beginning of the sting.
@@ -2077,7 +2080,7 @@ static void UI_ParseMenuText()
 	}
 	if (i != MNT_MAX)
 	{
-		Com_Printf( S_COLOR_RED "UI_ParseMenuText : not enough lines. Read %d of %d!\n",i,MNT_MAX);
+		// fewer strings than the enum: back-fill the rest with "?" (silent; was a red console error).
 		for(;i<MNT_MAX;i++) {
 			menu_normal_text[i] = "?";
 		}

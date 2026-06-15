@@ -33,6 +33,7 @@ void  SPR_GetVidSize(int* w, int* h);  // engine's real surface size
 void  SPR_GetLatestCmd(int* angles, signed char* fwd, signed char* side, signed char* up, int* buttons);
 int   SPR_S_RegisterSound(const char* name);
 void  SPR_S_StartSound(const float* origin, int entnum, int entchannel, int sfx);
+void  SPR_S_StartSoundVol(const float* origin, int entnum, int entchannel, int sfx, int volume);
 void  SPR_S_StartLocalSound(int sfx, int channel);
 void  SPR_S_ClearLoopingSounds(void);
 void  SPR_S_AddLoopingSound(int entnum, const float* origin, const float* velocity, int sfx);

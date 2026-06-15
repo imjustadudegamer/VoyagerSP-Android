@@ -539,6 +539,7 @@ static configcvar_t g_configcvars[] =
 	{"sensitivity",		0,					0},
 	{"in_joystick",		0,					0},
 	{"joy_threshold",	0,					0},
+	{"gp_lookSens",		0,					0},	// MUST be here: Controls_GetCvarValue reads this cached table, not the live cvar; missing entry -> reads 0 -> slider always loads at minimum on menu re-open
 	{"m_filter",		0,					0},
 	{"cl_anglespeedkey",0,					0},
 	{"use_ff",			0,					0},
@@ -1095,7 +1096,7 @@ static void Controls_GetConfig( void )
 	s_autoswitch_box.curvalue      = Controls_ClampCvar( 0, 2, Controls_GetCvarValue( "cg_autoswitch" ) );
 	s_joyenable_box.curvalue       = Controls_ClampCvar( 0, 1, Controls_GetCvarValue( "in_joystick" ) );
 	s_joythreshold_slider.curvalue = Controls_ClampCvar( 0.05f, 0.75f, Controls_GetCvarValue( "joy_threshold" ) );
-	s_gplook_slider.curvalue       = Controls_ClampCvar( 0.25f, 2.5f, Controls_GetCvarValue( "gp_lookSens" ) );
+	s_gplook_slider.curvalue       = Controls_ClampCvar( 1, 10, ( Controls_GetCvarValue( "gp_lookSens" ) - 0.25f ) / 0.25f + 1.0f );	// cvar 0.25..2.5 -> notch 1..10
 	s_keyturnspeed_slider.curvalue = Controls_ClampCvar( 1, 5, Controls_GetCvarValue( "cl_anglespeedkey" ) );
 }
 
@@ -1131,7 +1132,7 @@ static void Controls_SetConfig( void )
 	ui.Cvar_SetValue( "cg_autoswitch", s_autoswitch_box.curvalue );
 	ui.Cvar_SetValue( "in_joystick", s_joyenable_box.curvalue );
 	ui.Cvar_SetValue( "joy_threshold", s_joythreshold_slider.curvalue );
-	ui.Cvar_SetValue( "gp_lookSens", s_gplook_slider.curvalue );
+	ui.Cvar_SetValue( "gp_lookSens", 0.25f + ( s_gplook_slider.curvalue - 1.0f ) * 0.25f );	// notch 1..10 -> cvar 0.25..2.5
 	ui.Cvar_SetValue( "cl_anglespeedkey", s_keyturnspeed_slider.curvalue );
 
 }
@@ -2898,8 +2899,12 @@ static void ControlsMouseJoyStick_MenuInit( void )
 	s_gplook_slider.generic.flags			= QMF_SMALLFONT;
 	s_gplook_slider.generic.id				= ID_MOUSESPEED;
 	s_gplook_slider.generic.callback		= GamepadLookCallback;
-	s_gplook_slider.minvalue				= 0.25f;
-	s_gplook_slider.maxvalue				= 2.5f;
+	// 10 integer notches (0.25..2.5 step 0.25) mapped to the float cvar in the callback / load / save below.
+	// The generic Slider_Key arrow step is a hardcoded +-1 (ui_qmenu.cpp); a float 0.25..2.5 range spanned
+	// <2 steps so any d-pad nudge slammed the thumb to an end ("won't stay put"). Integer notches match how
+	// retail's own sliders work (s_sensitivity_slider 2..30, s_keyturnspeed_slider 1..5).
+	s_gplook_slider.minvalue				= 1;
+	s_gplook_slider.maxvalue				= 10;
 	s_gplook_slider.color					= CT_DKPURPLE1;
 	s_gplook_slider.color2					= CT_LTPURPLE1;
 	s_gplook_slider.generic.name			= "menu/common/monbar_2.tga";

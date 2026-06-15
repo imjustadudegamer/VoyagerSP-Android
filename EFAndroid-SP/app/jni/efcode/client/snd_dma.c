@@ -69,7 +69,7 @@ int   		s_paintedtime; 		// sample PAIRS
 
 // MAX_SFX may be larger than MAX_SOUNDS because
 // of custom player sounds
-#define		MAX_SFX			4096
+#define		MAX_SFX			10246	// retail retail S_FindName cap is 0x2806 (=10246); was 4096 here -> hit "out of sfx_t" 2.5x too early on long sessions
 sfx_t		s_knownSfx[MAX_SFX];
 int			s_numSfx = 0;
 
@@ -261,7 +261,10 @@ static sfx_t *S_FindName( const char *name ) {
 	}
 
 	if (!name[0]) {
-		Com_Printf( S_COLOR_YELLOW "WARNING: Sound name is empty\n" );
+		// Empty name -> silent (null) handle, safely. Data-driven empty sound fields (e.g. a breakable's
+		// unset `sounds` -> EV_GENERAL_SOUND empty configstring) reach here legitimately; retail ERR_FATALs,
+		// the port returns 0. Demote the warning to developer-only so it doesn't spam the console mid-mission.
+		Com_DPrintf( S_COLOR_YELLOW "WARNING: Sound name is empty\n" );
 		return NULL;
 	}
 
@@ -553,7 +556,7 @@ if origin is NULL, the sound will be dynamically sourced from the entity
 Entchannel 0 will never override a playing sound
 ====================
 */
-static void S_Base_StartSoundEx( vec3_t origin, int entityNum, int entchannel, sfxHandle_t sfxHandle, qboolean localSound ) {
+static void S_Base_StartSoundEx( vec3_t origin, int entityNum, int entchannel, sfxHandle_t sfxHandle, qboolean localSound, int volume /*0-255 full-scale; 255 = engine default*/ ) {
 	channel_t	*ch;
 	sfx_t		*sfx;
   int i, oldest, chosen, time;
@@ -675,7 +678,7 @@ static void S_Base_StartSoundEx( vec3_t origin, int entityNum, int entchannel, s
 		ch->fixed_origin = qfalse;
 	}
 
-	ch->master_vol = 127;
+	ch->master_vol = (volume * 127) / 255;	// 255 -> 127 (engine default); AS subwaves pass their volRange
 	ch->entnum = entityNum;
 	ch->thesfx = sfx;
 	ch->startSample = START_SAMPLE_IMMEDIATE;
@@ -694,7 +697,21 @@ if origin is NULL, the sound will be dynamically sourced from the entity
 ====================
 */
 void S_Base_StartSound( vec3_t origin, int entityNum, int entchannel, sfxHandle_t sfxHandle ) {
-	S_Base_StartSoundEx( origin, entityNum, entchannel, sfxHandle, qfalse );
+	S_Base_StartSoundEx( origin, entityNum, entchannel, sfxHandle, qfalse, 255 );
+}
+
+/*
+====================
+S_Base_StartSoundVolume
+
+Like S_StartSound but at an explicit volume (0-255 full-scale). origin==NULL plays
+non-attenuated (local). Used by the AS_* ambient-set subwaves to honor volRange.
+====================
+*/
+void S_Base_StartSoundVolume( vec3_t origin, int entityNum, int entchannel, sfxHandle_t sfxHandle, int volume ) {
+	qboolean local = (origin == NULL) ? qtrue : qfalse;
+	if ( volume < 0 ) volume = 0; else if ( volume > 255 ) volume = 255;
+	S_Base_StartSoundEx( origin, local ? listener_number : entityNum, entchannel, sfxHandle, local, volume );
 }
 
 /*
@@ -712,7 +729,7 @@ void S_Base_StartLocalSound( sfxHandle_t sfxHandle, int channelNum ) {
 		return;
 	}
 
-	S_Base_StartSoundEx( NULL, listener_number, channelNum, sfxHandle, qtrue );
+	S_Base_StartSoundEx( NULL, listener_number, channelNum, sfxHandle, qtrue, 255 );
 }
 
 
@@ -1629,6 +1646,7 @@ qboolean S_Base_Init( soundInterface_t *si ) {
 
 	si->Shutdown = S_Base_Shutdown;
 	si->StartSound = S_Base_StartSound;
+	si->StartSoundVolume = S_Base_StartSoundVolume;
 	si->StartLocalSound = S_Base_StartLocalSound;
 	si->StartBackgroundTrack = S_Base_StartBackgroundTrack;
 	si->StopBackgroundTrack = S_Base_StopBackgroundTrack;

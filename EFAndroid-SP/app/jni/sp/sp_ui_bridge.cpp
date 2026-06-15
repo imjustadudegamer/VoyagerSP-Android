@@ -167,7 +167,10 @@ static qboolean UII_SG_ValidateForLoadSaveScreen(const char* p){
     char tmp[iSG_COMMENT_SIZE];
     return SP_UI_ReadSaveComment(p, tmp) ? qtrue : qfalse;
 }
-static qboolean UII_SG_GameAllowedToSaveHere(qboolean inCamera){ (void)inCamera; return qtrue; }
+extern "C" qboolean SP_GameAllowedToSaveHere(void);   // sp_bridge.cpp: consults ge->GameAllowedToSaveHere (== !in_camera)
+// Match retail: the SP Save menu blocks (MNT_CANNOTSAVE) while a cinematic is active, instead of the old
+// unconditional qtrue stub. The engine save path (SP_SaveGame) is the hard backstop for console saves.
+static qboolean UII_SG_GameAllowedToSaveHere(qboolean inCamera){ (void)inCamera; return SP_GameAllowedToSaveHere(); }
 // Capture the description the Save menu typed; SP_SaveGame (sp_bridge.cpp) reads it for the COMM chunk.
 char g_spSaveComment[iSG_COMMENT_SIZE] = {0};
 static void     UII_SG_StoreSaveGameComment(const char* s){ sp_strncpyz(g_spSaveComment, s?s:"", iSG_COMMENT_SIZE); }

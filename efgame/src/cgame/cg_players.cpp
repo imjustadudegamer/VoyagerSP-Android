@@ -118,9 +118,12 @@ static sfxHandle_t	CG_CustomSound( int entityNum, const char *soundName, int cus
 	clientInfo_t *ci;
 	int			i;
 
-	if ( soundName[0] != '*' ) 
+	if ( soundName[0] != '*' )
 	{
-		return cgi_S_RegisterSound( soundName );
+		// Guard a data-driven empty name: EV_GENERAL/GLOBAL_SOUND with an empty configstring (e.g.
+		// ExplodeDeath on a breakable whose `sounds` field is unset) reaches here with "" -> engine
+		// "WARNING: Sound name is empty" (retail actually ERR_FATALs here). Return the silent handle 0.
+		return soundName[0] ? cgi_S_RegisterSound( soundName ) : 0;
 	}
 
 	if ( !g_entities[entityNum].client )
