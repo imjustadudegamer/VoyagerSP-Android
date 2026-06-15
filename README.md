@@ -30,6 +30,10 @@ No game data is included. You need your own copy of the retail game
   your `pak*.pk3` files and a retail `efgamex86.dll` with the system file picker and
   copies them into place. No storage permission needed at any target SDK.
 
+## Screenshot from the first mission
+
+<img width="1920" height="1080" alt="ScreenRecordofVoyagerSP - Trim - frame at 1m5s" src="https://github.com/user-attachments/assets/ca33430e-20ca-42ed-8d29-32836066d375" />
+
 ## Requirements
 
 - Android 7.0+ (API 24) with Vulkan support — the APK declares Vulkan as a required
