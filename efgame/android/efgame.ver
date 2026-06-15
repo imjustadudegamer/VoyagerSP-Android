@@ -1,0 +1,7 @@
+EFGAME_1.0 {
+  global:
+    _Z10GetGameAPIP13game_import_t;   /* GetGameAPI(game_import_t*) */
+    _Z6vmMainiiiiiiiii;               /* vmMain(int x9)  -- cgame */
+    _Z8dllEntryPFiizE;                /* dllEntry(int(*)(int,...)) -- cgame */
+  local: *;
+};

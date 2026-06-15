@@ -1,0 +1,32 @@
+# Build outputs
+**/build/
+**/.cxx/
+**/.gradle/
+*.apk
+*.so
+*.o
+*.a
+build64/
+efsp_obb_backup/
+
+# Local config
+**/local.properties
+.idea/
+*.iml
+
+# Game data / binaries (not redistributable; not source)
+*.pk3
+*.exe
+*.dll
+*.bik
+*.roq
+
+# Logs / scratch
+*.log
+/tmp/
+efsp_*.log
+
+# Vendored third-party deps (not our source)
+thirdparty/
+*.DLL
+*.EXE

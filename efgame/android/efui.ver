@@ -1,0 +1,5 @@
+EFUI_1.0 {
+  global:
+    _Z8GetUIAPIv;                     /* GetUIAPI() */
+  local: *;
+};

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- API 28+: render edge-to-edge into the display cutout/notch area so the
+         game fills the whole physical screen (no black strip beside the cutout).
+         No-op on devices without a cutout; only applies on Android 9+. -->
+    <style name="AppTheme" parent="android:Theme.NoTitleBar.Fullscreen">
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+    </style>
+</resources>
