@@ -1031,6 +1031,13 @@ See if the current console command is claimed by the game
 ====================
 */
 qboolean SV_GameCommand( void ) {
+	// EF1 SP (route-b): the bridge owns the game sim; the HM server (sv.state==SS_GAME) is never up,
+	// so forward to the SP game's exported ConsoleCommand instead (mirrors UI_GameCommand ->
+	// SPUI_ConsoleCommand in cl_ui.c). Without this, "use <targetname>" and every other server console
+	// command (g_svcmds.cpp) is dropped -> e.g. the Virtual Voyager turbolift never changes decks.
+	{ extern int SP_IsActive( void ); extern int SP_GameConsoleCommand( void );
+	  if ( SP_IsActive() ) return SP_GameConsoleCommand() ? qtrue : qfalse; }
+
 	if ( sv.state != SS_GAME ) {
 		return qfalse;
 	}

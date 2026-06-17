@@ -220,7 +220,12 @@ static void SP_FinishTrans_f(void){
         SP_AbortToMenu();
     }
 }
-static void SP_Use_f(void){ SP_ClientCommand(); }
+// "use <targetname>" is a SERVER console command -> the game's exported ConsoleCommand
+// (g_svcmds.cpp: ConsoleCommand -> Svcmd_Use_f -> G_UseTargets2). It is NOT a ClientCommand verb
+// (g_cmds.cpp ClientCommand has no "use"), so routing it to SP_ClientCommand silently did nothing
+// -> the Virtual Voyager turbolift menu's "use tour_turbo_NN" never changed decks, and no scripted
+// "use <ent>" worked. Route it to the game's ConsoleCommand instead.
+static void SP_Use_f(void){ extern int SP_GameConsoleCommand(void); SP_GameConsoleCommand(); }
 extern void SP_SaveGame( const char *name );
 extern void SP_LoadGameFile( const char *name );
 static void SP_Save_f(void){

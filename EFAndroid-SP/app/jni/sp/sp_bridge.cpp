@@ -1452,6 +1452,16 @@ extern "C" void SP_ClientFrames(int n){
 }
 
 extern "C" int SP_IsActive(void){ return g_spActive; }
+// Route-b: the bridge replaced the engine server, so the engine's SV_GameCommand (gated on
+// sv.state==SS_GAME) never fires -> the game's exported ConsoleCommand (g_svcmds.cpp: use/nav/npc/
+// Command/Hail/entitylist/ICARUS/...) was UNREACHABLE. That silently dropped every server console
+// command issued by the game/UI/scripts -- notably the Virtual Voyager turbolift menu's
+// "use tour_turbo_NN" (deck change) and the personal-log/holodeck "use <panel>" activations.
+// SV_GameCommand now forwards here when SP is active (mirrors UI_GameCommand -> SPUI_ConsoleCommand).
+// Returns 1 only if the game claimed the command, so unclaimed cmds still fall through to UI_GameCommand.
+extern "C" int SP_GameConsoleCommand(void){
+    return ( ge && g_spActive && ge->ConsoleCommand && ge->ConsoleCommand() ) ? 1 : 0;
+}
 // True while a save-load/transition is queued (g_transMap set) but the SP cgame hasn't come up yet.
 // The load watchdog (sp_integration.c) uses this to retry a starved/dropped efsptrans before it
 // gives up and bounces to the main menu.
