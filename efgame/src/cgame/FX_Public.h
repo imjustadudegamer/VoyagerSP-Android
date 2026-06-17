@@ -563,7 +563,15 @@ typedef struct FX_state_s
 	int				killTime;
 } FX_state_t;
 
-#define	MAX_EFFECTS		1024
+// EFSP: bumped 1024 -> 4096. The FX pool is a FIXED ring; when full, FX_AddPrimitive evicts to make room,
+// so a just-created effect (e.g. the per-frame phaser BEAM line in FX_PhaserFire) gets dropped before FX_Add
+// can draw it -> "yellow disks, no beam stream" in heavy scenes. Retail's per-frame particle spawners
+// (CG_Teleporter/CG_ParticleStream: 1 particle/frame, 6s life, NOT frametime-scaled) are framerate-dependent;
+// this port runs at com_maxfps=120 (vs retail ~85) so stasis3's battle teleporters alone pegged the 1024 pool
+// at ~1024 (≈48% purpleparticle), starving the beam. This is MAP/EFFECT-AGNOSTIC (any high-FX scene can hit it).
+// The cap only bounds eviction; GPU cost tracks the scene's ACTUAL live-effect count (which com_maxfps bounds),
+// NOT this number -- so a larger ring just lets real effects survive to draw instead of being evicted.
+#define	MAX_EFFECTS		4096
 
 extern FX_state_t	FX_renderList[ MAX_EFFECTS ];
 extern FX_state_t	*FX_nextValid;

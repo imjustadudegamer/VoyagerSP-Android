@@ -1214,13 +1214,19 @@ static void SP_SaveGameInternal(const char* name, qboolean bEAUTO){
     }
     snprintf(mpcm,sizeof(mpcm),"%s", g_curMap);
     I_Append('COMM', comm, 128); I_Append('SHOT', shot, 256*256*4); I_Append('MPCM', mpcm, 1024);
-    // CVCN: persist EVERY CVAR_ARCHIVE cvar so a load restores the exact save-time state, byte-matching retail
-    // (stvoy retail walks the cvar registry and writes a 'CVCN' count then ('CVAR' name)+('VALU' value)
-    // pairs for each archived cvar; a retail auto.sav carries g_gravity/legsModel/torsoModel/headModel/handicap/
-    // sex/snaps/name/g_spskill). g_spskill (difficulty) is the gameplay-critical one; the rest restore the
-    // player's model/name/handicap to save-time values. Read back generically by SP_LoadGameFile.
+    // CVCN: persist the savegame cvars so a load restores the exact save-time state, byte-matching retail.
+    // RETAIL FILTER IS CVAR_USERINFO (bit 0x2), NOT CVAR_ARCHIVE: stvoy SV_WriteGame (retail) walks the
+    // cvar registry and writes a 'CVCN' count then ('CVAR' name)+('VALU' value) pairs ONLY for cvars whose
+    // flags have bit 2 set -> a retail auto.sav carries EXACTLY 9: g_gravity/legsModel/torsoModel/headModel/
+    // handicap/sex/snaps/name/g_spskill. The game deliberately tags these CVAR_USERINFO ("using userinfo as
+    // savegame flag", g_main.cpp:152/154). Using CVAR_ARCHIVE here was WRONG -- in this ioq3-derived engine
+    // hundreds of cvars are CVAR_ARCHIVE (all r_*/cg_*/cl_*/s_*/net_*), so the save wrote ~240 cvars and the
+    // load (SP_LoadGameFile) Cvar_Set them all back, CLOBBERING the player's live video/audio/control settings
+    // to save-time values (only cg_forceAspect was band-aided). CVAR_USERINFO restores the retail 9 and matches
+    // the PC save byte-for-byte. g_spskill (ARCHIVE|USERINFO) and g_gravity (USERINFO) are both still captured.
+    // Old 240-cvar saves still load fine (the read loop is generic on the CVCN count).
     {
-        char info[8192]; { const char* src=Cvar_InfoString_Big(CVAR_ARCHIVE); int i=0; for(; src[i] && i<8191; i++) info[i]=src[i]; info[i]=0; }
+        char info[8192]; { const char* src=Cvar_InfoString_Big(CVAR_USERINFO); int i=0; for(; src[i] && i<8191; i++) info[i]=src[i]; info[i]=0; }
         int seps=0; for(const char* c=info; *c; c++) if(*c=='\\') seps++;
         int nc = seps/2;                                     // infostring "\k\v\k\v" => 2 backslashes per cvar
         I_Append('CVCN', &nc, 4);

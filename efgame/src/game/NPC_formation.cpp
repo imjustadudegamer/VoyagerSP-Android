@@ -2061,12 +2061,112 @@ static void NPC_ShowFormationPath(void)
 
 /*
 -------------------------
+NPC_TryReenlistFormation
+
+Self-heal for an NPC that is in BS_FORMATION but was never enlisted into its squad
+(iSquadPathIndex == -1, no team_leader/leader links). This happens when the level's
+SET_CREATEFORMATION script ran at a moment the member was not yet an enlistable candidate
+(e.g. it spawns/teleports in slightly after the formation was built); the member is then
+left orphaned and that orphaned state is what gets saved, so reloads can't fix it either.
+
+Retail relies on the member's formation membership having been established once and then
+persisting; it never produces this orphan. We reproduce the SAME end state retail has by
+running the exact per-member enlistment from G_CreateFormation for this single member, using
+the member's real squadPath. Map-agnostic: it only fires for an orphaned BS_FORMATION NPC
+whose squadname matches the (always player) squad leader AND who has a matching squadPath, so
+it never alters a correctly-formed squad. Returns true once enlisted.
+-------------------------
+*/
+
+qboolean NPC_TryReenlistFormation( gentity_t *self )
+{
+	int			i, idx = -1;
+	gentity_t	*leader = &g_entities[0];	// EF squad formations are always player-led
+	gentity_t	*last;
+
+	if ( !self || !self->client || !self->NPC )
+		return qfalse;
+
+	//Already enlisted?  Nothing to heal.
+	if ( self->NPC->iSquadPathIndex != -1 )
+		return qfalse;
+
+	//Need a squad name and a script_targetname to match a squadPath
+	if ( VALIDSTRING( self->client->squadname ) == false || VALIDSTRING( self->script_targetname ) == false )
+		return qfalse;
+
+	//Leader must exist, have a squad name, and share ours (same test G_CreateFormation uses)
+	if ( !leader->client || VALIDSTRING( leader->client->squadname ) == false )
+		return qfalse;
+	if ( Q_stricmp( leader->client->squadname, self->client->squadname ) != 0 )
+		return qfalse;
+
+	//Find our squadPath by script_targetname
+	for ( i = 0; i < num_squad_paths; i++ )
+	{
+		if ( Q_stricmp( self->script_targetname, squadPaths[i].ownername ) == 0 )
+		{
+			idx = i;
+			break;
+		}
+	}
+
+	if ( idx == -1 )
+		return qfalse;	//no squadPath for us; can't enlist (leave as-is, retail behavior)
+
+	//Enlist exactly as G_CreateFormation's per-member block does
+	self->NPC->iSquadPathIndex  = idx;
+	self->NPC->iSquadRouteIndex = idx;
+
+	//Append onto the end of the leader's follower chain
+	last = leader;
+	while ( last->client->follower && last->client->follower != self )
+	{
+		last = last->client->follower;
+	}
+	last->client->follower    = self;
+	self->client->leader      = last;
+	self->client->team_leader = leader;
+	leader->client->team_leader = leader;
+
+	self->NPC->behaviorState = BS_FORMATION;
+	self->NPC->tempBehavior  = BS_DEFAULT;
+
+	self->NPC->sPCurSegPoint1  = self->NPC->sPCurSegPoint2  = -1;
+	self->NPC->sPDestSegPoint1 = self->NPC->sPDestSegPoint2 = 0;	//head for the first one
+	VectorCopy( squadPaths[idx].waypoints[0].origin, self->NPC->sPDestPos );
+	self->NPC->aiFlags |= NPCAI_OFF_PATH;
+	self->NPC->aiFlags &= ~NPCAI_FORM_TELE_NAV;
+	self->NPC->lastSquadPoint = -1;
+	self->NPC->scriptFlags |= SCF_CAREFUL;
+	VectorClear( self->NPC->leaderTeleportSpot );
+
+	return qtrue;
+}
+
+/*
+-------------------------
 NPC_BSFormation
 -------------------------
 */
 
 void NPC_BSFormation(void)
 {
+	// EFSP self-heal: if we reached BS_FORMATION but were never enlisted into the squad
+	// (orphaned: iSquadPathIndex == -1), try to join now using our real squadPath. Once
+	// enlisted this is a no-op. Throttled per-entity so a member that genuinely has no
+	// squadPath (idx==-1) doesn't re-scan every frame.
+	if ( NPCInfo->iSquadPathIndex == -1 )
+	{
+		static int s_nextHealAttempt[MAX_GENTITIES];
+		int en = NPC->s.number;
+		if ( en >= 0 && en < MAX_GENTITIES && level.time >= s_nextHealAttempt[en] )
+		{
+			s_nextHealAttempt[en] = level.time + 1000;
+			NPC_TryReenlistFormation( NPC );
+		}
+	}
+
 	vec3_t	weapspot, enemyorg, aimdir, desiredAngles, diff, dir;
 	qboolean	faced = qfalse;
 
