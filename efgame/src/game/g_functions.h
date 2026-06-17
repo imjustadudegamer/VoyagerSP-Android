@@ -169,6 +169,7 @@ extern void Think_BeginMoving	( gentity_t *ent );
 extern void Think_SetupTrainTargets	( gentity_t *ent );
 extern void Think_SpawnNewDoorTrigger	( gentity_t *ent );
 extern void ref_link			( gentity_t *ent );
+extern void TAG_FlushPending	( void );
 extern void Think_Target_Delay	( gentity_t *ent );
 extern void target_laser_think	( gentity_t *ent );
 extern void target_laser_start	( gentity_t *ent );

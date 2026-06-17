@@ -386,3 +386,42 @@ void SP_reference_tag ( gentity_t *ent )
 		ref_link( ent );
 	}
 }
+
+/*
+-------------------------
+TAG_FlushPending
+
+Route-b load fix (port adaptation). A ref_tag WITH a target defers its TAG_Add to a
+thinkF_ref_link think at level.time+0.1 (SP_reference_tag, above) because its target may not be
+spawned yet partway through the spawn loop. That deferral is fatal on a USER LOAD: the bridge runs
+ge->Init -- which re-spawns these ref_tags and re-arms the +0.1 think -- and THEN ge->ReadLevel,
+whose ReadGEntities G_FreeEntity's every inuse slot NOT present in the save. These ref_tags are
+never in the save (they self-free via ref_link in the original session, long before the save is
+written), so the freshly-spawned ref_tag is freed before its think can fire. TAG_Add never runs,
+the tag is absent after load, and a cinematic camera that reads tag("name",ORIGIN) resolves to an
+unwritten/garbage vector -> the camera flies into the void -> totally black cutscene with audio
+(observed: stasis1 teleporter conversation, camera at an uninitialized (0,0,~-1545)).
+
+Flush every still-pending ref_tag registration NOW, at the end of InitGame, when all entities --
+including every target -- already exist, so the tag is added BEFORE ReadLevel can wipe the entity.
+The tag lives in the heap refTagOwner map, independent of the entity slot, so it survives ReadLevel.
+For New Game / forward transitions the result is identical (the tag registers a hair earlier than
+the deferred think would; nothing moves in that 0.1s at spawn). This touches NO savegame chunk --
+the on-disk format is unchanged and OLD saves load unaffected (and are likewise repaired).
+-------------------------
+*/
+
+void TAG_FlushPending( void )
+{
+	for ( int i = MAX_CLIENTS; i < globals.num_entities; i++ )
+	{
+		gentity_t	*ent = &g_entities[i];
+
+		// ref_link adds the tag (target now resolvable) and G_FreeEntity's the ref_tag,
+		// clearing the pending think so it cannot double-fire on the first RunFrame.
+		if ( ent->inuse && ent->e_ThinkFunc == thinkF_ref_link )
+		{
+			ref_link( ent );
+		}
+	}
+}

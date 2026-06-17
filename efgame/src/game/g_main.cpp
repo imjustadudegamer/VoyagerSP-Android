@@ -295,6 +295,12 @@ void InitGame(  const char *mapname, const char *spawntarget, int checkSum, cons
 	// general initialization
 	G_FindTeams();
 
+	// Register all deferred (targeted) ref_tags NOW that every entity (incl. their targets) is
+	// spawned, so a USER LOAD's subsequent ge->ReadLevel cannot free their fresh-spawned entities
+	// before the +0.1s think fires (which left cinematic-camera tag() lookups resolving to garbage
+	// -> black cutscenes). Save-format-neutral; see TAG_FlushPending in g_ref.cpp.
+	TAG_FlushPending();
+
 	SaveRegisteredItems();
 
 	gi.Printf ("-----------------------------------\n");

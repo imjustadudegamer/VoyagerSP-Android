@@ -483,8 +483,12 @@ int CTaskManager::GetVector( int entID, CBlock *block, int &memberNum, vector_t 
 		{
 			(m_owner->GetInterface())->I_DPrintf( WL_ERROR, "Unable to find tag \"%s\"!\n", tagName );
 			assert(0);
-			return TASK_FAILED;
-		}		
+			// Fail SAFE: return false (not TASK_FAILED). TASK_FAILED==1==true, so the caller's
+			// VALIDATE(a){ if(a==false) ... } never tripped and the camera command proceeded with
+			// the UNWRITTEN output vector (uninitialized stack -> flew into the void -> black). A
+			// missing tag must abort the shot like the sibling failure returns below (:498,:506).
+			return false;
+		}
 
 		return true;
 	}
