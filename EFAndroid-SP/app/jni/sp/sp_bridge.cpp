@@ -75,6 +75,7 @@ extern "C" {
     unsigned char *CM_ClusterPVS( int cluster );
     qboolean CM_AreasConnected( int area1, int area2 );
     void  CM_AdjustAreaPortalState( int area1, int area2, qboolean open );
+    int   CM_BoxLeafnums( const vec3_t mins, const vec3_t maxs, int *list, int listsize, int *lastLeaf );
     void  Cvar_Register( vmCvar_t *vmCvar, const char *varName, const char *defaultValue, int flags );
     void  Cvar_Update( vmCvar_t *vmCvar );
     void  Cmd_ArgsBuffer( char *buffer, int bufferLength );
@@ -97,6 +98,8 @@ static gentity_t *g_linked[SP_MAX_ENT];
 static int        g_numLinked = 0;
 static char       g_curMap[64] = {0};   // current SP map name (for save framing + transitions)
 static int        g_entClip[SP_MAX_ENT];   // bmodel clipHandle per entity number (for mover traces)
+static int        g_entArea[SP_MAX_ENT][2]; // [0]=areanum [1]=areanum2 (-1 none); per-entity, set at link (retail svEntity_t)
+static qboolean   g_entPortalOpen[SP_MAX_ENT]; // per-door areaportal open state -> idempotent guard vs CM ref-count under/overflow
 static int SP_EntNum( gentity_t *e ){ return (int)(((unsigned char*)e - (unsigned char*)ge->gentities) / ge->gentitySize); }
 
 
@@ -141,6 +144,26 @@ static void W_LinkEntity( gentity_t *ent ){
     for(int i=0;i<3;i++){
         ent->absmin[i] = ent->currentOrigin[i] + ent->mins[i] - 1;
         ent->absmax[i] = ent->currentOrigin[i] + ent->maxs[i] + 1;
+    }
+    // Retail SV_LinkEntity area assignment (brush models only -- doors/breakables drive areaportals): collect
+    // the leafs the entity spans; areanum = first real area, areanum2 = a distinct second area when it straddles
+    // one (a closed door in a doorway straddles the two areas its areaportal joins). Consumed by
+    // W_AdjustAreaPortalState. Recomputed every link, exactly like retail.
+    if( ent->bmodel ){
+        int eNum = SP_EntNum(ent);
+        if( eNum >= 0 && eNum < SP_MAX_ENT ){
+            int leafs[128], lastLeaf=0;
+            int num = CM_BoxLeafnums( ent->absmin, ent->absmax, leafs, 128, &lastLeaf );
+            int a1=-1, a2=-1;
+            for( int i=0; i<num; i++ ){
+                int area = CM_LeafArea( leafs[i] );
+                if( area == -1 ) continue;
+                if( a1 != -1 && a1 != area ) a2 = area;
+                else                         a1 = area;
+            }
+            g_entArea[eNum][0] = a1;
+            g_entArea[eNum][1] = a2;
+        }
     }
     // Encode size into entityState.solid for client prediction (mirrors SV_LinkEntity sv_world.c:222-310):
     // SOLID_BMODEL for inline brush models (CG_Mover requires this to pick cgs.inlineDrawModel[] over
@@ -261,12 +284,25 @@ static int  W_PointContents( const vec3_t p, int passEntityNum ){
     }
     return contents;
 }
-static qboolean W_InPVS( const vec3_t p1, const vec3_t p2 ){
+// Cluster-only PVS (retail SV_inPVSIgnorePortals): visibility regardless of door/areaportal state.
+static qboolean W_InPVSIgnorePortals( const vec3_t p1, const vec3_t p2 ){
     int l1=CM_PointLeafnum(p1), l2=CM_PointLeafnum(p2);
     unsigned char *vis=CM_ClusterPVS(CM_LeafCluster(l1));
     int c2=CM_LeafCluster(l2);
     if(c2<0) return qfalse;
     return (vis[c2>>3] & (1<<(c2&7))) ? qtrue : qfalse;
+}
+// Full PVS (retail SV_inPVS): cluster vis AND the two leaf areas connected. The area test is what makes a
+// CLOSED door (sealed areaportal) block visibility -- previously absent because W_AdjustAreaPortalState was a
+// no-op, so inPVS never closed across a shut door. Consequence: a BS_REMOVE NPC behind a closed door
+// (NPC_BSRemove despawns only when !inPVS(self,player)) stayed solid forever and deadlocked scripted walks
+// (voy6: Chang parked on foster's navgoal). Snapshot building does NOT use inPVS, so tightening it cannot
+// drop entities from the client; only game-side AI/sound/removal become portal-correct, matching retail.
+static qboolean W_InPVS( const vec3_t p1, const vec3_t p2 ){
+    if( !W_InPVSIgnorePortals(p1,p2) ) return qfalse;
+    int l1=CM_PointLeafnum(p1), l2=CM_PointLeafnum(p2);
+    if( !CM_AreasConnected( CM_LeafArea(l1), CM_LeafArea(l2) ) ) return qfalse;
+    return qtrue;
 }
 static void W_SetBrushModel( gentity_t *ent, const char *name ){
     if(!name||name[0]!='*'){ ent->bmodel=qfalse; return; }
@@ -294,12 +330,44 @@ static int  W_EntitiesInBox( const vec3_t mins, const vec3_t maxs, gentity_t **l
     return n;
 }
 static qboolean W_EntityContact( const vec3_t mins, const vec3_t maxs, const gentity_t *ent ){
+    // Broad-phase AABB reject (cheap, identical to the old behaviour for a clean miss).
     if(ent->absmin[0]>maxs[0]||ent->absmax[0]<mins[0]) return qfalse;
     if(ent->absmin[1]>maxs[1]||ent->absmax[1]<mins[1]) return qfalse;
     if(ent->absmin[2]>maxs[2]||ent->absmax[2]<mins[2]) return qfalse;
-    return qtrue;
+    // Narrow-phase: retail SV_EntityContact traces the [mins,maxs] box against the entity's REAL clip hull
+    // (CM_TransformedBoxTrace, return startsolid) -- the old AABB-only test reported contact for the whole
+    // bounding box even when the actual (L-shaped/angled) trigger brush wasn't touched, so triggers fired
+    // early, from the wrong side, or through gaps. G_TouchTriggers runs this for the player every frame, so it
+    // affects every non-rectangular trigger. mins/maxs are world-abs (caller g_active.cpp:276), so trace from
+    // vec3_origin like retail. Clip-handle selection mirrors W_Trace's narrow phase.
+    int eNum = SP_EntNum((gentity_t*)ent);
+    static const float vz[3] = {0,0,0};
+    int h;
+    if( ent->bmodel ){
+        h = ( ent->s.modelindex > 0 ) ? CM_InlineModel( ent->s.modelindex )
+                                      : ((eNum>=0 && eNum<SP_MAX_ENT) ? g_entClip[eNum] : 0);
+    } else {
+        h = CM_TempBoxModel( ent->mins, ent->maxs, 0 );
+    }
+    if( h <= 0 ) return qfalse;
+    trace_t tr;
+    CM_TransformedBoxTrace(&tr, vz, vz, mins, maxs, h, -1,
+                           ent->currentOrigin, ent->bmodel ? ent->currentAngles : vz, 0);
+    return tr.startsolid ? qtrue : qfalse;
 }
-static void W_AdjustAreaPortalState( gentity_t *ent, qboolean open ){ (void)ent;(void)open; }
+// Retail SV_AdjustAreaPortalState: a brush entity (door/breakable) that straddles two areas toggles the
+// areaportal between them when it opens/closes, so CM_AreasConnected (and thus inPVS) reflects whether a shut
+// door blocks sight. Was a no-op stub -> doors never sealed PVS. The g_entPortalOpen idempotent guard keeps
+// CM's ref-count from under/overflowing (ERR_DROP) if the game ever issues an unbalanced open/close across the
+// port's respawn/relink paths; with balanced retail calls it never triggers, so behaviour matches retail.
+static void W_AdjustAreaPortalState( gentity_t *ent, qboolean open ){
+    int eNum = SP_EntNum(ent);
+    if( eNum < 0 || eNum >= SP_MAX_ENT ) return;
+    if( g_entArea[eNum][1] == -1 ) return;            // doesn't straddle two areas -> no portal to toggle
+    if( g_entPortalOpen[eNum] == open ) return;       // already in this state -> avoid CM ref-count drift
+    g_entPortalOpen[eNum] = open;
+    CM_AdjustAreaPortalState( g_entArea[eNum][0], g_entArea[eNum][1], open );
+}
 static qboolean W_AreasConnected( int a, int b ){ return CM_AreasConnected(a,b); }
 
 // ----- import wrappers (signature/return-type adapters) -----
@@ -458,7 +526,7 @@ extern "C" qboolean SP_LoadGame( const char *solib ){
     gi.SetConfigstring=I_SetCS; gi.GetConfigstring=I_GetCS;
     gi.GetUserinfo=I_GetUserinfo; gi.SetUserinfo=I_SetUserinfo; gi.GetServerinfo=I_GetServerinfo;
     gi.SetBrushModel=W_SetBrushModel; gi.trace=W_Trace; gi.pointcontents=W_PointContents;
-    gi.inPVS=W_InPVS; gi.inPVSIgnorePortals=W_InPVS;
+    gi.inPVS=W_InPVS; gi.inPVSIgnorePortals=W_InPVSIgnorePortals;
     gi.AdjustAreaPortalState=W_AdjustAreaPortalState; gi.AreasConnected=W_AreasConnected;
     gi.linkentity=W_LinkEntity; gi.unlinkentity=W_UnlinkEntity;
     gi.EntitiesInBox=W_EntitiesInBox; gi.EntityContact=W_EntityContact;
@@ -513,6 +581,7 @@ extern "C" qboolean SP_SpawnServer( const char *mapname ){
     // clamps (all relative), so the 20Hz cadence + interpolation are preserved. New-Game-scoped: a LOAD /
     // transition takes g_levelTime from the save (SP_LoadGameFile/SP_FinishTransition), unaffected.
     g_numLinked = 0; g_levelTime = 1000;
+    memset(g_entPortalOpen, 0, sizeof(g_entPortalOpen));  // New Game: CM (re)loaded -> all areaportals start sealed
     Cvar_Set( "cl_paused", "0" );   // EF1 SP 1:1: retail SV_SpawnServer unpauses every spawn (sv_init.c:464)
     memset(g_voiceEnd, 0, sizeof(g_voiceEnd)); memset(g_sOverride, 0, sizeof(g_sOverride)); // fresh map: no stale voices
     // BRIDGE-side statics dlclose does NOT touch (these live in libmain, not libefgame) — reset per map:
@@ -581,6 +650,10 @@ static void BuildSnapshot(void){
     memset(&g_snap, 0, sizeof(g_snap));
     g_snap.serverTime = g_levelTime;
     g_snap.serverCommandSequence = g_svCmdSeq;   // tell the cgame how many server commands exist
+    g_snap.cmdNum = g_cmdNum;   // cmd this snapshot reflects. Retail SV stamps it; if left 0, cg_predict.cpp:413
+                                // (current - snap.cmdNum >= CMD_BACKUP) trips once g_cmdNum passes 64 and FREEZES
+                                // the predicted view (visible during timescale<1 slow-mo). Stamping = prediction
+                                // tracks the snapshot (predicted_player_state = snap.ps), no spurious replay.
     gentity_t* p0 = SP_GEntity(0);
     if(p0->client) g_snap.ps = *(playerState_t*)p0->client;
     int n=0;
@@ -1044,10 +1117,27 @@ extern "C" qboolean SP_FinishTransition(void){
     snprintf(g_configstrings[CS_SERVERINFO], sizeof(g_configstrings[0]), "\\mapname\\%s\\sv_maxclients\\1", g_transMap);  // cgame mapname for Route-b world load + info
     char* entstring = CM_EntityString();
     g_numLinked = 0;
+    memset(g_entPortalOpen, 0, sizeof(g_entPortalOpen));  // CM reloaded this map -> all areaportals start sealed
     // eAUTO for forward transitions (so ClientSpawn restores the carried loadout); eFULL for a normal
     // user save-load (unchanged behavior). Mirrors retail SV_ReadGame retail=(GAME!=0)+1.
     SavedGameJustLoaded_e sg = (g_transGameFlag != 0) ? eAUTO : eFULL;
     blog("SP_FinishTransition: sg=%d (transGameFlag=%d hub=%d)\n", (int)sg, g_transGameFlag, g_transHub);
+    // RETAIL PARITY: reset the level clock to 1000 on every eAUTO spawn. Retail SV_LoadGame runs SV_SpawnServer
+    // (which sets the level clock to 1000) and reads the saved 'TIME' chunk back into it
+    // ONLY for eFULL user saves (`if (GAME==0)`); an eAUTO load keeps SV_SpawnServer's 1000. The port had
+    // diverged: a forward transition carried the monotonic session g_levelTime forward (never reset), and an
+    // eAUTO autosave LOAD set g_levelTime=tnow in SP_LoadGameFile -- so a mid-campaign map's opening script
+    // ran at a multi-million-ms clock instead of ~1000. EF1 SP openings are timing-sensitive (the warm-up
+    // gate g_target.cpp:707 `level.time<1000`, and NPC-nav-gated player unlocks): voy6's intro nests its ONLY
+    // SET_PLAYER_LOCKED false inside affect("introfoster") behind a scripted walk, so at the high clock that
+    // block never completes and the player is locked forever (can look, can't move). eAUTO respawns every
+    // entity FRESH from the BSP here (their think/nav timers re-derive against the new clock), so 1000 is the
+    // correct, retail-matching origin. eFULL is deliberately untouched: its ReadLevel restores absolute
+    // entity timers, so it MUST keep the saved TIME (g_levelTime=tnow set in SP_LoadGameFile).
+    if( sg == eAUTO ){
+        blog("SP_FinishTransition: eAUTO -> reset g_levelTime %d -> 1000 (retail SV_SpawnServer parity)\n", g_levelTime);
+        g_levelTime = 1000;
+    }
     ge->Init(g_transMap, g_transSpawn, checksum, entstring, g_levelTime,
              Sys_Milliseconds(), Sys_Milliseconds(), sg, g_transHub ? qtrue : qfalse);
     BuildGameState();

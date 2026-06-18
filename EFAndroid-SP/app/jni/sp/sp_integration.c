@@ -58,8 +58,20 @@ void SPR_AddRefEntity(const void* spRe, int spSize){
     refEntity_t e;                         // HM layout
     int n = spSize < (int)sizeof(e) ? spSize : (int)sizeof(e);
     memset(&e, 0, sizeof(e));
-    memcpy(&e, spRe, n);                    // shared prefix (reType..shaderTime) is layout-identical
-    if((int)e.reType >= 0 && (int)e.reType < 8) e.reType = (refEntityType_t)spReTypeToHM[(int)e.reType];
+    memcpy(&e, spRe, n);                    // shared prefix (reType..shaderTime, offset 0..131) is layout-identical
+    int spReType = (int)e.reType;          // original SP reType (0..7) BEFORE remap
+    // SP and HM refEntity_t DIVERGE after shaderTime: SP has vec3 lightDir(132) then float radius(144),
+    // rotation(148); HM (ELITEFORCE) has the `data` union right at 132 (sprite.rotation, sprite.radius,
+    // vertRGBA). So the raw memcpy drops SP's lightDir into sprite.rotation/radius -> RT_SPRITE radius/rotation
+    // become garbage (usually 0 -> zero-size/invisible or mis-rotated). Re-read the SP sprite fields from their
+    // true offsets and clear vertRGBA. (SP RT_SPRITE == reType 2; FX disks use AddPolyToScene, not this path.)
+    if(spReType == 2 && spSize >= (int)(38 * sizeof(float))){
+        const float* spF = (const float*)spRe;
+        e.data.sprite.radius   = spF[36];  // SP radius   @ offset 144
+        e.data.sprite.rotation = spF[37];  // SP rotation @ offset 148
+        memset(e.data.sprite.vertRGBA, 0, sizeof(e.data.sprite.vertRGBA));
+    }
+    if(spReType >= 0 && spReType < 8) e.reType = (refEntityType_t)spReTypeToHM[spReType];
     re.AddRefEntityToScene(&e);
 }
 void SPR_AddPoly(int hShader, int numVerts, const void* verts){

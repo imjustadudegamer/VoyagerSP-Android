@@ -11,6 +11,10 @@ efsp_obb_backup/
 
 # Local config
 **/local.properties
+
+# Release signing key (NEVER commit — debug.keystore is intentionally tracked)
+*.jks
+voyagersp-release.keystore
 .idea/
 *.iml
 
