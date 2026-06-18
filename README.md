@@ -57,15 +57,14 @@ The manual push target (e.g. over adb) is
 
 ## Known issues
 
-This is an early release and has not been fully play-tested end to end. Known
-limitations as of this build:
+This port is 90% complete, but has yet to be fully play tested. Known issues:
 
-- **Loading screens are missing** — level transitions show no loading art yet.
-- **Save corruption is possible** — back up your saves; loads may occasionally fail
-  or restore an inconsistent state.
+- **Loading screens are missing** — level transitions show no LCARS animated loading art yet, they were removed in very early unreleased builds as they actively caused issues.
+- **Save corruption is technically possible** — back up your saves; loads may occasionally fail
+  or restore an inconsistent state. Most save specific isssues have been resolved, however latent bugs might still present themselves.
 - **Minor graphical and audio glitches** are still present.
 - **Character animations are not 100% accurate** yet.
-- The game is **not fully play-tested**, so other issues may surface.
+- **REPORT YOUR ISSUES PLEASE!**
 
 ## Build
 
