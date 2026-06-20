@@ -17,12 +17,20 @@
 typedef struct roff_hdr_s
 {
 	char	sHeader[4];		// should be "ROFF" (Rotation, Origin File Format)
-	long	lVersion;	
+	int		lVersion;		// on-disk field is 4 bytes; retail used `long` which is 4 on Win32/ILP32
+							// but 8 on arm64/LP64 -- that bloated this header from 12 to 24 bytes and
+							// broke the raw-cast parse (header validation failed -> ROFFs never played
+							// -> e.g. voy8 vent door never opened). Keep it width-explicit (4 bytes).
 	float	fCount;			// There isn't any reason for this to be anything other than an int, sigh...
-		//						
+		//
 		//		Move - Rotate data follows....vec3_t delta_origin, vec3_t delta_rotation
 		//
 } roff_hdr_t;
+
+#ifdef __cplusplus
+// The struct is cast directly over the raw .rof file bytes, so its size MUST stay 12.
+static_assert( sizeof(roff_hdr_t) == 12, "roff_hdr_t must match the 12-byte on-disk ROFF header" );
+#endif
 
 
 // ROFF move rotate data element

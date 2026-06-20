@@ -164,7 +164,6 @@ protected:
 	int			GetInteger( void );
 	
 	char	GetChar( void );
-	long	GetLong( void );
 	float	GetFloat( void );
 
 	void	StripExtension( const char *, char * );	//Utility function to strip away file extensions

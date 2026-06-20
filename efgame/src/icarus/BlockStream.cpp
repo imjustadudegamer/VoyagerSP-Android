@@ -435,22 +435,6 @@ int	CBlockStream::GetInteger( void )
 
 /*
 -------------------------
-GetLong
--------------------------
-*/
-
-long CBlockStream::GetLong( void )
-{
-	long data;
-
-	data = *(long *) (m_stream + m_streamPos);
-	m_streamPos += sizeof( data );
-
-	return data;
-}
-
-/*
--------------------------
 GetFloat
 -------------------------
 */

@@ -385,21 +385,6 @@ float CNavigator::GetFloat( fileHandle_t file )
 
 /*
 -------------------------
-GetLong
--------------------------
-*/
-
-long CNavigator::GetLong( fileHandle_t file )
-{
-	long value;
-
-	gi.FS_Read( &value, sizeof( value ), file );
-
-	return value;
-}
-
-/*
--------------------------
 Init
 -------------------------
 */

@@ -177,7 +177,6 @@ protected:
 	char	GetChar( fileHandle_t file );
 	int		GetInt( fileHandle_t file );
 	float	GetFloat( fileHandle_t file );
-	long	GetLong( fileHandle_t file );
 
 	void	ConnectNodes( void );
 	int		GetEdgeCost( CNode *first, CNode *second );
