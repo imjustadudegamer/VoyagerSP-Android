@@ -72,7 +72,7 @@ set(SYS_MAIN ${EF}/sys/sys_main.c)
 
 # ---- renderer: VULKAN-ONLY (Quake3e renderervk port — kills the Mali pipeline-revalidation panning
 #      stutter). The dead OpenGL trees (renderergl1/renderergl2) were stripped: this SP port and the HM
-#      port (engine-sp/engine-shared = renderervk + renderercommon only) both ship Vulkan exclusively.
+#      port (renderervk + renderercommon only) both ship Vulkan exclusively.
 #      The old EF_RENDERER=gl2|vulkan switch + the gl2 fallback branch are gone — there is no GL renderer
 #      to fall back to. (renderercommon stays: renderervk's shared tr_*.c use its GL-enum/qgl compat.) ----
 file(GLOB RENDERCOMMON_SRC ${EF}/renderercommon/*.c)

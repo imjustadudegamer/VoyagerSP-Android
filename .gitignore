@@ -29,6 +29,12 @@ voyagersp-release.keystore
 *.log
 /tmp/
 efsp_*.log
+*.sav
+_save_backup_*/
+*.idsig
+
+# Local-only analysis artifacts (not source, never publish)
+binary_analysis/
 
 # Vendored third-party deps (not our source)
 thirdparty/

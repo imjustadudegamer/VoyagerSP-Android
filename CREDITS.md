@@ -19,7 +19,7 @@ glue, the JNI/engine bridge, and the handheld-specific fixes noted at the bottom
 - Thanks to the **"The Dark Project" / Voyager: Insurrection** mod team, whose advocacy led Raven to
   release the SP source SDK.
 
-## Engine (`EFAndroid-SP/app/jni/efcode`, `engine-sp/`)
+## Engine (`EFAndroid-SP/app/jni/efcode`)
 
 idTech3 lineage, all **GPLv2**:
 
