@@ -767,7 +767,7 @@ typedef struct litSurf_s {
 } litSurf_t;
 #endif
 
-#define	MAX_FACE_POINTS		64
+#define	MAX_FACE_POINTS		1024	// retail EF maps (e.g. scav5) have faces >64 pts; sanity cap only, points[] is alloc'd dynamically
 
 #define	MAX_PATCH_SIZE		32			// max dimensions of a patch mesh in map file
 #define	MAX_GRID_SIZE		(128+1)		// max dimensions of a grid mesh in memory

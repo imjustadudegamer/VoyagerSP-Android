@@ -716,8 +716,15 @@ static void ParseFace( const dsurface_t *ds, const drawVert_t *verts, int numPoi
 
 	for ( i = 0 ; i < numIndexes ; i++ ) {
 		unsigned num = LittleLong( srcIndexes[ i ] );
-		if ( num >= numPoints )
-			ri.Error( ERR_DROP, "%s: bad index", __func__ );
+		if ( num >= (unsigned)numPoints ) {
+			// Don't ERR_DROP the whole map load on a single out-of-range index
+			// (e.g. a face whose point count was clamped above, or a malformed BSP).
+			// Degrade gracefully: collapse the index to 0 so the triangle becomes
+			// degenerate (renders nothing) and flag the surface with the default shader.
+			ri.Printf( PRINT_WARNING, "%s: bad index %u (numPoints=%i), surface degraded\n", __func__, num, numPoints );
+			num = 0;
+			surf->shader = tr.defaultShader;
+		}
 		indexes[i] = num;
 	}
 
