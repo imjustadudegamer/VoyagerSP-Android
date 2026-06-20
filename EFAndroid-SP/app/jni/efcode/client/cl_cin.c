@@ -129,15 +129,15 @@ typedef struct {
 	long				drawX, drawY;
 	int					module;
 	qboolean			isBink;			// EF1 SP: this handle is a Bink (.bik) movie
-	// EF1 SP 1:1: retail in-game-cinematic flag (retail retail, latched from
-	// CIN_PlayCinematic param_2 at retail:2923). When set, this .bik is an in-level
+	// EF1 SP 1:1: retail in-game-cinematic flag, latched from the CIN_PlayCinematic
+	// in-game parameter. When set, this .bik is an in-level
 	// OVERLAY: clc.state stays CA_ACTIVE, cl_paused=1, the sim freezes, the video draws over
 	// the paused world, and skip/EOF unpause+resume the mission (NEVER disconnect / nextmap).
 	qboolean			inGameCinematic;
-	// EF1 SP 1:1 video fade (retail retail @ 0x403cd0 latches cl_VidFadeUp/Down
-	// into retail/retail; retail @ 0x403790 ramps the DrawStretchRaw
-	// alpha 0->1 / 1->0 over 1000ms). The retail re.DrawStretchRaw took an alpha; the
-	// port's does not, so the fade is reproduced as a black overlay in CIN_DrawCinematic.
+	// EF1 SP 1:1 video fade. The retail engine latches cl_VidFadeUp/Down at play time and
+	// ramps the DrawStretchRaw alpha 0->1 / 1->0 over 1000ms. The retail re.DrawStretchRaw
+	// took an alpha; the port's does not, so the fade is reproduced as a black overlay in
+	// CIN_DrawCinematic.
 	qboolean			vidFadeUp;		// cl_VidFadeUp latched at play
 	qboolean			vidFadeDown;	// cl_VidFadeDown latched at play
 	int					fadeDownStart;	// CL_ScaledMilliseconds() when the last frame was reached
@@ -1324,11 +1324,10 @@ e_status CIN_StopCinematic(int handle) {
 	currentHandle = handle;
 
 	if ( cinTable[handle].isBink ) {
-		// EF1 SP 1:1 retail SCR_StopCinematic (retail retail @ 0x4035c0): close the
-		// movie, then restore game state by kind. A fullscreen cinematic (alterGameState,
-		// CA_CINEMATIC) drops to CA_DISCONNECTED (decomp 2342-2344); the in-game overlay clears
-		// cl_paused so the paused mission resumes and stays CA_ACTIVE (decomp 2378). Neither
-		// chains nextmap here — that lives in the EOF path (CIN_RunCinematic / retail).
+		// EF1 SP 1:1 retail SCR_StopCinematic: close the movie, then restore game state by
+		// kind. A fullscreen cinematic (alterGameState, CA_CINEMATIC) drops to CA_DISCONNECTED;
+		// the in-game overlay clears cl_paused so the paused mission resumes and stays
+		// CA_ACTIVE. Neither chains nextmap here — that lives in the EOF path (CIN_RunCinematic).
 		Bink_Stop( handle );
 		cinTable[handle].isBink = qfalse;
 		cinTable[handle].buf = NULL;
@@ -1387,11 +1386,11 @@ e_status CIN_RunCinematic (int handle)
 				cinTable[handle].startTime = now;
 				cinTable[handle].status = FMV_PLAY;
 			} else if ( cinTable[handle].inGameCinematic ) {
-				// EF1 SP 1:1: retail retail:2398-2402 — an in-game overlay that reaches
-				// its last frame is stopped via SCR_StopCinematic(0), which clears cl_paused and
+				// EF1 SP 1:1: in the retail engine an in-game overlay that reaches its last
+				// frame is stopped via SCR_StopCinematic(0), which clears cl_paused and
 				// resumes the (paused) mission. It NEVER chains nextmap or disconnects; clc.state
 				// stays CA_ACTIVE. If a fade-down is active (cl_VidFadeDown), hold the last frame
-				// until the 1s fade completes first (retail:2493-2502), then stop.
+				// until the 1s fade completes first, then stop.
 				if ( cinTable[handle].vidFadeDown ) {
 					if ( !cinTable[handle].fadeDownStart ) cinTable[handle].fadeDownStart = now;
 					if ( now - cinTable[handle].fadeDownStart < 1000 ) {
@@ -1403,8 +1402,8 @@ e_status CIN_RunCinematic (int handle)
 				return FMV_EOF;
 			} else if ( cinTable[handle].holdAtEnd ) {
 				// hold last frame (inGameCinematic CIN_hold): the script resumes the map.
-				// EF1 SP 1:1: retail retail (@0x403790:2493-2502) starts the 1s
-				// fade-down the moment the final frame is reached; latch the time here.
+				// EF1 SP 1:1: the retail engine starts the 1s fade-down the moment the
+				// final frame is reached; latch the time here.
 				if ( cinTable[handle].vidFadeDown && !cinTable[handle].fadeDownStart ) {
 					cinTable[handle].fadeDownStart = now;
 				}
@@ -1506,7 +1505,7 @@ int CIN_PlayCinematic( const char *arg, int x, int y, int w, int h, int systemBi
 		Com_sprintf (name, sizeof(name), "%s", arg);
 	}
 
-	// EF1 SP 1:1: the real engine (retail retail) resolves cinematics as
+	// EF1 SP 1:1: the retail engine resolves cinematics as
 	// "video/%s.bik" from a BARE name — every trigger ('cinematic eflogo' at boot, the
 	// New-Game intro, st_NN mission cutscenes) passes no extension. Append .bik so those
 	// hit the Bink path; explicit .bik/.roq names are left untouched.
@@ -1558,7 +1557,7 @@ int CIN_PlayCinematic( const char *arg, int x, int y, int w, int h, int systemBi
 	cinTable[currentHandle].inGameCinematic = qfalse;
 	cinTable[currentHandle].holdAtEnd = (systemBits & CIN_hold) != 0;
 	cinTable[currentHandle].alterGameState = (systemBits & CIN_system) != 0;
-	// EF1 SP 1:1: retail in-game-overlay flag (retail retail, retail:2923).
+	// EF1 SP 1:1: retail in-game-overlay flag.
 	cinTable[currentHandle].inGameCinematic = (systemBits & CIN_inGame) != 0;
 	cinTable[currentHandle].playonwalls = 1;
 	cinTable[currentHandle].silent = (systemBits & CIN_silent) != 0;
@@ -1575,7 +1574,7 @@ int CIN_PlayCinematic( const char *arg, int x, int y, int w, int h, int systemBi
 #endif
 		}
 	} else if (cinTable[currentHandle].inGameCinematic) {
-		// EF1 SP 1:1: retail retail:2931 pauses the sim for the in-game overlay
+		// EF1 SP 1:1: the retail engine pauses the sim for the in-game overlay
 		// (Cvar_Set("cl_paused","1")). The SP bridge freezes the sim while cl_paused is set
 		// and re-draws the frozen world; the video then overlays on top (SCR_DrawScreenField,
 		// CA_ACTIVE case). playonwalls stays 1 so this draws full-screen via SCR_DrawCinematic
@@ -1602,9 +1601,9 @@ int CIN_PlayCinematic( const char *arg, int x, int y, int w, int h, int systemBi
 		cinTable[currentHandle].dirty      = qfalse;
 		cinTable[currentHandle].startTime  = cinTable[currentHandle].lastTime = CL_ScaledMilliseconds();
 		cinTable[currentHandle].status     = FMV_PLAY;
-		// EF1 SP 1:1: latch the video-fade cvars at play time exactly like retail
-		// retail (retail @ 0x403cd0:2913-2914). The ICARUS SET_VIDEO_FADE_IN/OUT
-		// ops (efgame Q3_Interface.cpp) cvar_set these right before triggering the FMV.
+		// EF1 SP 1:1: latch the video-fade cvars at play time exactly like the retail
+		// engine. The ICARUS SET_VIDEO_FADE_IN/OUT ops (efgame Q3_Interface.cpp) cvar_set
+		// these right before triggering the FMV.
 		cinTable[currentHandle].vidFadeUp     = Cvar_VariableValue( "cl_VidFadeUp" )   != 0.0f;
 		cinTable[currentHandle].vidFadeDown   = Cvar_VariableValue( "cl_VidFadeDown" ) != 0.0f;
 		cinTable[currentHandle].fadeDownStart = 0;
@@ -1729,12 +1728,12 @@ void CIN_ResampleCinematic(int handle, int *buf2) {
 ==================
 CIN_DrawFadeOverlay
 
-EF1 SP 1:1 video fade. Retail (retail retail @ 0x403790:2491-2516) scaled the
-DrawStretchRaw vertex alpha 0->1 (fade-up, cl_VidFadeUp) over the first 1000ms and 1->0
-(fade-down, cl_VidFadeDown) over the last 1000ms, using a 0.001/ms ramp (retail)
-and clamping to 1.0 (retail). The port renderer's re.DrawStretchRaw has no alpha
-parameter, so the identical visual is produced by laying a black quad of alpha (1-fade)
-over the cinematic rect (640x480 virtual space, same coords as the video).
+EF1 SP 1:1 video fade. The retail engine scaled the DrawStretchRaw vertex alpha 0->1
+(fade-up, cl_VidFadeUp) over the first 1000ms and 1->0 (fade-down, cl_VidFadeDown) over
+the last 1000ms, using a 0.001/ms ramp and clamping to 1.0. The port renderer's
+re.DrawStretchRaw has no alpha parameter, so the identical visual is produced by laying a
+black quad of alpha (1-fade) over the cinematic rect (640x480 virtual space, same coords
+as the video).
 ==================
 */
 static void CIN_DrawFadeOverlay( int handle ) {
@@ -1844,11 +1843,11 @@ void CIN_DrawCinematic (int handle) {
 	CIN_DrawFadeOverlay( handle );
 }
 
-// EF1 SP 1:1: retail "inGameCinematic" (retail retail -> CIN_PlayCinematic(name, 1))
-// plays the .bik as an IN-LEVEL OVERLAY, NOT the fullscreen CA_CINEMATIC path. The ICARUS
-// SET_VIDEO_PLAY op (efgame Q3_Interface.cpp:7128) is FIRE-AND-FORGET — it sends this command
-// and the script continues — so the engine pauses the sim (retail:2931 cl_paused=1),
-// overlays the video on the frozen world, and unpauses+resumes the mission on EOF/skip.
+// EF1 SP 1:1: the retail "inGameCinematic" path (CIN_PlayCinematic(name, 1)) plays the .bik
+// as an IN-LEVEL OVERLAY, NOT the fullscreen CA_CINEMATIC path. The ICARUS SET_VIDEO_PLAY op
+// (efgame Q3_Interface.cpp) is FIRE-AND-FORGET — it sends this command and the script
+// continues — so the engine pauses the sim (cl_paused=1), overlays the video on the frozen
+// world, and unpauses+resumes the mission on EOF/skip.
 // (The old port routed this through "cinematic %s 1" = the fullscreen CA_CINEMATIC path, which
 // froze SP_DrawFrame -> sim/script stopped -> HANG, and a tap hit the CA_CINEMATIC skip path
 // -> CL_Disconnect_f -> main menu. CIN_inGame selects the retail overlay path instead.)
@@ -1924,7 +1923,7 @@ void SCR_StopCinematic(void) {
 	}
 }
 
-// EF1 SP 1:1: retail "is in-game cinematic" query (retail retail -> retail).
+// EF1 SP 1:1: retail "is in-game cinematic" query.
 // True while an inGameCinematic overlay is on screen: SCR_DrawScreenField overlays the FMV in
 // the CA_ACTIVE frame, the SP bridge keeps the sim frozen (cl_paused), and a tap/key skips it
 // (the 1.2s-guarded SCR_StopCinematic) instead of routing to the CA_CINEMATIC disconnect path.
@@ -1934,11 +1933,11 @@ qboolean CL_InGameCinematicActive( void ) {
 	         && cinTable[CL_handle].status != FMV_EOF );
 }
 
-// EF1 SP 1:1: retail in-cinematic skip key (retail key handler decomp 5048 -> retail(1)).
-// A key/tap during an in-game overlay skips it, but only after the 1.2s guard (retail:2331,
-// 0x4b0 ms since play time) so an accidental tap at the very start cannot instantly cut the FMV.
+// EF1 SP 1:1: retail in-cinematic skip key (the key handler calls SCR_StopCinematic).
+// A key/tap during an in-game overlay skips it, but only after the 1.2s guard (1200 ms since
+// play time) so an accidental tap at the very start cannot instantly cut the FMV.
 // Returns qtrue when the key belongs to the cinematic (caller consumes it) — including inside the
-// guard window, exactly like retail (which `return`s after retail(1) regardless), so taps
+// guard window, exactly like retail (which returns after the stop call regardless), so taps
 // during the FMV never leak through to gameplay. On a real skip the overlay is stopped, which
 // clears cl_paused and resumes the mission (CIN_StopCinematic) — it never disconnects.
 qboolean CL_SkipInGameCinematic( void ) {

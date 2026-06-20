@@ -414,7 +414,7 @@ void *Hunk_Alloc( int size, ha_pref preference );
 #define	CIN_hold	4
 #define CIN_silent	8
 #define CIN_shader	16
-// EF1 SP 1:1: retail "inGameCinematic" (retail retail -> CIN_PlayCinematic(name,1))
+// EF1 SP 1:1: retail "inGameCinematic" (CIN_PlayCinematic(name,1))
 // is an IN-LEVEL OVERLAY: it stays CA_ACTIVE + cl_paused=1 and draws the FMV over the live
 // (paused) game, instead of the fullscreen CA_CINEMATIC path. This bit selects that path.
 #define CIN_inGame	32

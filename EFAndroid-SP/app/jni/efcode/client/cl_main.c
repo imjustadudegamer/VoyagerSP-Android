@@ -4052,8 +4052,8 @@ void CL_Init( void ) {
 	Cmd_AddCommand ("demo", CL_PlayDemo_f);
 	Cmd_SetCommandCompletionFunc( "demo", CL_CompleteDemoName );
 	Cmd_AddCommand ("cinematic", CL_PlayCinematic_f);
-	// EF1 SP 1:1: retail registers a separate "inGameCinematic" command (retail
-	// retail) that ICARUS scripts use for mission FMVs via SET_VIDEO_PLAY ->
+	// EF1 SP 1:1: retail registers a separate "inGameCinematic" command that ICARUS
+	// scripts use for mission FMVs via SET_VIDEO_PLAY ->
 	// SendConsoleCommand("inGameCinematic <name>"). Without it mission .bik never play.
 	Cmd_AddCommand ("inGameCinematic", CL_PlayInGameCinematic_f);
 	Cmd_AddCommand ("stoprecord", CL_StopRecord_f);

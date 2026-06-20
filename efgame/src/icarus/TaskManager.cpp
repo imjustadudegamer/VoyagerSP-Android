@@ -1624,7 +1624,7 @@ void CTaskManager::Save( void )
 	CTaskGroup	*taskGroup;
 	const char	*name;
 	CBlock		*block;
-	// TKTS is a fixed 4-byte chunk in retail (retail:10390 writes length 4). DWORD is
+	// TKTS is a fixed 4-byte chunk in retail (length 4). DWORD is
 	// `unsigned long` (interface.h:6) = 4 bytes on x86/armv7 but 8 on arm64/LP64, which would make the
 	// arm64 save write/read an 8-byte TKTS and break byte-compat with retail 32-bit saves. Pin to 4 bytes.
 	unsigned int	timeStamp;

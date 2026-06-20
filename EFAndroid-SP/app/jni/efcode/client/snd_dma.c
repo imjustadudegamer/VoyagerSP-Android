@@ -69,7 +69,7 @@ int   		s_paintedtime; 		// sample PAIRS
 
 // MAX_SFX may be larger than MAX_SOUNDS because
 // of custom player sounds
-#define		MAX_SFX			10246	// retail retail S_FindName cap is 0x2806 (=10246); was 4096 here -> hit "out of sfx_t" 2.5x too early on long sessions
+#define		MAX_SFX			10246	// retail S_FindName cap is 10246; was 4096 here -> hit "out of sfx_t" 2.5x too early on long sessions
 sfx_t		s_knownSfx[MAX_SFX];
 int			s_numSfx = 0;
 

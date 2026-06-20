@@ -1267,7 +1267,7 @@ void CL_KeyDownEvent( int key, unsigned time )
 	}
 
 
-	// EF1 SP 1:1 (retail key handler decomp 5048 -> retail(1)): a key/tap with no
+	// EF1 SP 1:1 (matches the retail engine key handler): a key/tap with no
 	// key-catcher during an IN-GAME cinematic overlay (clc.state stays CA_ACTIVE) skips it via
 	// the 1.2s-guarded SCR_StopCinematic, which clears cl_paused and resumes the mission. This
 	// replaces the broken old behavior where mission FMVs (routed through CA_CINEMATIC) sent a

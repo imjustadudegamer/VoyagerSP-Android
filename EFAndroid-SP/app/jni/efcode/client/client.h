@@ -642,8 +642,8 @@ void	SCR_DrawSmallChar( int x, int y, int ch );
 
 void CL_PlayCinematic_f( void );
 void CL_PlayInGameCinematic_f( void );
-qboolean CL_InGameCinematicActive( void );	// EF1 SP: in-game .bik overlay is on screen (retail retail)
-qboolean CL_SkipInGameCinematic( void );	// EF1 SP: tap/key skips the in-game overlay (retail retail(1))
+qboolean CL_InGameCinematicActive( void );	// EF1 SP: in-game .bik overlay is on screen (matches the retail engine)
+qboolean CL_SkipInGameCinematic( void );	// EF1 SP: tap/key skips the in-game overlay (matches the retail engine)
 void SCR_DrawCinematic (void);
 void SCR_RunCinematic (void);
 void SCR_StopCinematic (void);

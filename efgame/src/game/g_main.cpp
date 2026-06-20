@@ -223,7 +223,7 @@ void InitGame(  const char *mapname, const char *spawntarget, int checkSum, cons
 	// bridge's first ge->RunFrame (sp_bridge.cpp SP_FinishTransition / SP_StartClient), which is AFTER
 	// InitGame but BEFORE CG_INIT. Retail reloads the game+cgame DLL every map, so in_camera/client_camera
 	// are zeroed by the module reload BEFORE SV_SpawnServer's warm-up frames fire the opening script
-	// (retail retail: SV_InitGameProgs THEN the 3 warm-up frames). The port REUSES the .so,
+	// (retail SV_InitGameProgs THEN the 3 warm-up frames). The port REUSES the .so,
 	// so it must zero explicitly -- and the zero MUST precede the opening RunFrame. Previously the reset
 	// lived in CGCam_Init called from CG_INIT, which on a FORWARD transition runs AFTER that RunFrame
 	// (g_levelTime carries forward, so a worldspawn-less map's bare target_scriptrunner is already past its

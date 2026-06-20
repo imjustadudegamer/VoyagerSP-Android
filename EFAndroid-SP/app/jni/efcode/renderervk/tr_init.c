@@ -1052,8 +1052,8 @@ static void R_LevelShot( void ) {
 ====================
 RB_CaptureSaveThumb  (EFSP)
 
-The SP bridge embeds a 256x256 RGBA thumbnail of the clean game frame in each .sav 'SHOT' chunk (retail
-retail grabs the 256x256 framebuffer). Captured on the SAME safe end-of-frame path as screenshots
+The SP bridge embeds a 256x256 RGBA thumbnail of the clean game frame in each .sav 'SHOT' chunk (the retail
+engine grabs the 256x256 framebuffer). Captured on the SAME safe end-of-frame path as screenshots
 (RB_ReadPixels), so the GPU readback is valid; the bridge arms it (throttled) only on un-paused gameplay
 frames, so the captured image is the clean 3D+HUD with no menu overlay. RB_ReadPixels returns bottom-up
 RGB; we keep that order and add opaque alpha -> bottom-up RGBA. The save menu draws the thumb with negative
@@ -1573,7 +1573,7 @@ static void R_Register( void )
 	//
 	r_fullbright = ri.Cvar_Get( "r_fullbright", "0", CVAR_LATCH );
 	ri.Cvar_SetDescription( r_fullbright, "Debugging tool to render the entire level without lighting." );
-	// Retail EF1 ships r_overBrightBits 0 / r_mapOverBrightBits 0 (retail:48449/54603, default "0").
+	// Retail EF1 ships r_overBrightBits 0 / r_mapOverBrightBits 0 (default "0").
 	// At 1/1 the gamma post-pass multiplies the whole resolved scene by obScale=(1<<overbrightBits)=2 -> the
 	// world renders ~2x too bright / washed out. Match retail: 0/0 -> obScale=1.0, identityLight=1.0.
 	r_overBrightBits = ri.Cvar_Get( "r_overBrightBits", "0", CVAR_ARCHIVE_ND | CVAR_LATCH );

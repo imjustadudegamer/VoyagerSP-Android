@@ -678,8 +678,8 @@ void Player_RestoreFromPrevLevel(gentity_t *ent)
 Player_CacheForNextLevel
   Description	: record the player's loadout (health/armor/weapons/ammo/borg-adapt/viewangles) into the
 				engine carry-cvars so the NEXT level's Player_RestoreFromPrevLevel can carry it across a
-				forward map transition. In retail this was done by the ENGINE (stvoy SV save-for-transition,
-				retail); this Android port replaced the engine with a bridge, and the bridge spawns the
+				forward map transition. In retail this was done by the ENGINE (the retail SV save-for-transition path);
+				this Android port replaced the engine with a bridge, and the bridge spawns the
 				new map FRESH (it does NOT restore the old map's entity table — that would drag the old map's
 				inline-model *N indices into the new BSP -> CM_InlineModel crash). So the game records the
 				carry here; the cvars live in the engine module and survive the per-map libefgame reload.

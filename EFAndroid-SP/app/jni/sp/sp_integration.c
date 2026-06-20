@@ -398,7 +398,7 @@ void SP_AbortToMenu(void){
 
 // The SP loopback has no server to pause, so the bridge must pause its own sim when a menu/console is up.
 // Returns 1 when the in-game menu (ESC) or console is open -> SP_DrawFrame freezes time + skips RunFrame.
-// EF1 SP 1:1: also pause on cl_paused. Retail's in-game cinematic (retail:2931) sets cl_paused=1
+// EF1 SP 1:1: also pause on cl_paused. Retail's in-game cinematic sets cl_paused=1
 // to freeze the live game while the .bik overlays it, then SCR_StopCinematic clears it to resume the
 // mission. Mirroring retail SV_Frame (which skips the sim while sv_paused/cl_paused) keeps the world
 // frozen behind the FMV; the cgame still re-draws that frozen frame so the overlay sits on top.

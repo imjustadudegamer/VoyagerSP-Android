@@ -1339,8 +1339,8 @@ static qboolean UI_ConsoleCommand( void ) {
 	// EFSP fix (Virtual Voyager USE): route the in-game LCARS panel/console commands to
 	// UI_SetActiveMenu, where the turbolift/holodeck/log/transporter/padd/... handlers live.
 	// target_interface_use (g_target.cpp) sends "genericmenu <id>"; the holodeck flow sends
-	// genericholomenu/endholomenu. RETAIL registered these as ENGINE commands (stvoy:
-	// genericmenu->retail, endholodeckmenu->retail, Cmd_AddCommand) that forwarded to
+	// genericholomenu/endholomenu. RETAIL registered these as ENGINE commands
+	// (genericmenu, endholodeckmenu via Cmd_AddCommand) that forwarded to
 	// the UI. The Quake3e-derived port engine never registered them, and UI_ConsoleCommand only
 	// handled the "ui_*" verbs -> "genericmenu turbolift"/"genericmenu log1" fell through every
 	// command handler and was dropped, so the turbolift + personal-log + all LCARS menus never

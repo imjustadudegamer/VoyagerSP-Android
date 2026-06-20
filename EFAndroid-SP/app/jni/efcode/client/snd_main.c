@@ -495,8 +495,8 @@ void S_Init( void )
 
 	s_volume = Cvar_Get( "s_volume", "0.8", CVAR_ARCHIVE );
 	s_musicVolume = Cvar_Get( "s_musicvolume", "0.25", CVAR_ARCHIVE );
-	// Sound menu "Voice Volume" slider writes s_volumeVoice (ui_sound.cpp:50). Retail registers it
-	// (retail:25685). Without this the slider wrote an orphan cvar nothing read.
+	// Sound menu "Voice Volume" slider writes s_volumeVoice (ui_sound.cpp:50). The retail engine registers
+	// it. Without this the slider wrote an orphan cvar nothing read.
 	Cvar_Get( "s_volumeVoice", "1", CVAR_ARCHIVE );
 	s_muted = Cvar_Get("s_muted", "0", CVAR_ROM);
 	s_doppler = Cvar_Get( "s_doppler", "1", CVAR_ARCHIVE );
@@ -516,7 +516,7 @@ void S_Init( void )
 		Cmd_AddCommand( "stopmusic", S_StopMusic_f );
 		Cmd_AddCommand( "s_list", S_SoundList );
 		Cmd_AddCommand( "s_stop", S_StopAllSounds );
-		// Retail (stvoy) registers "stopsound" -> S_StopAllSounds (retail:25735). The closing-credits
+		// The retail engine registers "stopsound" -> S_StopAllSounds. The closing-credits
 		// menu issues "stopsound" (ui_credits.cpp:4351) to kill lingering level sounds; without this the
 		// command was dropped and audio bled under the credits music.
 		Cmd_AddCommand( "stopsound", S_StopAllSounds );
