@@ -812,18 +812,11 @@ Sys_ShowIP
 ==================
 */
 void Sys_ShowIP(void) {
-	int i;
-	char addrbuf[NET_ADDRSTRMAXLEN];
-
-	for(i = 0; i < numIP; i++)
-	{
-		Sys_SockaddrToString(addrbuf, sizeof(addrbuf), (struct sockaddr *) &localIP[i].addr);
-
-		if(localIP[i].type == NA_IP)
-			Com_Printf( "IP: %s\n", addrbuf);
-		else if(localIP[i].type == NA_IP6)
-			Com_Printf( "IP6: %s\n", addrbuf);
-	}
+	// Local interface addresses are intentionally NOT logged. Enumerating them
+	// prints every LAN, VPN/tunnel, and public IPv6 address the device holds,
+	// which is personally identifying and was leaking into user-shared crash
+	// logs. The addresses are still gathered (numIP/localIP) for binding; this
+	// only suppresses echoing them to the console.
 }
 
 
@@ -1462,9 +1455,13 @@ static qboolean NET_GetCvars( void ) {
 	// I want server owners to explicitly turn on ipv6 support.
 	net_enabled = Cvar_Get( "net_enabled", "1", CVAR_LATCH | CVAR_ARCHIVE );
 #else
-	/* End users have it enabled so they can connect to ipv6-only hosts, but ipv4 will be
-	 * used if available due to ping */
-	net_enabled = Cvar_Get( "net_enabled", "3", CVAR_LATCH | CVAR_ARCHIVE );
+	/* Single-player port: real networking is disabled. The campaign runs
+	 * entirely on the in-memory loopback channel, so no UDP sockets are opened,
+	 * no listening ports are bound, and local interface addresses are never
+	 * enumerated or logged. CVAR_ROM with default "0" forces this off even on
+	 * devices that previously archived net_enabled "3", and prevents it from
+	 * being re-enabled at runtime. */
+	net_enabled = Cvar_Get( "net_enabled", "0", CVAR_ROM );
 #endif
 	modified = net_enabled->modified;
 	net_enabled->modified = qfalse;
