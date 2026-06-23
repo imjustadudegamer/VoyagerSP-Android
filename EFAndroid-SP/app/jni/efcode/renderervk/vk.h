@@ -3,7 +3,11 @@
 #include "../renderercommon/vulkan/vulkan.h"
 #include "tr_common.h"
 
-#define MAX_SWAPCHAIN_IMAGES 8
+// minImageCount is only a *minimum* — the driver may return more images than
+// requested (e.g. Mali-G52 returns 9 in MAILBOX mode). There is no app-side cap
+// (maxImageCount is read-only and often 0/unlimited), so this bound just has to be
+// large enough to hold whatever the driver allocates. 16 gives generous headroom.
+#define MAX_SWAPCHAIN_IMAGES 16
 #define MIN_SWAPCHAIN_IMAGES_IMM 3
 #define MIN_SWAPCHAIN_IMAGES_FIFO   3
 #define MIN_SWAPCHAIN_IMAGES_FIFO_0 4
