@@ -43,6 +43,7 @@ extern "C" {
     void  FS_Rename( const char *from, const char *to );
     cvar_t *Cvar_Get( const char *name, const char *value, int flags );
     void  Cvar_Set( const char *name, const char *value );
+    int   Cvar_Flags( const char *name );   // engine flags, or CVAR_NONEXISTENT if unregistered
     int   Cvar_VariableIntegerValue( const char *name );
     void  Cvar_VariableStringBuffer( const char *name, char *buf, int bufsize );
     char *Cvar_InfoString_Big( int bit );   // all CVAR_ARCHIVE cvars as "\key\val\..." for the CVCN save bag
@@ -1432,13 +1433,39 @@ extern "C" void SP_LoadGameFile(const char* name){
     char aspectPref[16]; aspectPref[0]=0; Cvar_VariableStringBuffer("cg_forceAspect", aspectPref, sizeof(aspectPref));
     I_ReadSG('COMM', comm,128,0); I_ReadSG('SHOT', shot,256*256*4,0); I_ReadSG('MPCM', mpcm,1024,0);
     I_ReadSG('CVCN', &ncvc,4,0);                              // M-1: retail's archived-cvar count FourCC (was 'NCVC')
+#ifndef CVAR_NONEXISTENT
+#define CVAR_NONEXISTENT 0x80000000   // engine Cvar_Flags() sentinel; absent from the 2000-era game q_shared.h
+#endif
     for(int i=0;i<ncvc;i++){
         char cv[64], vl[256]; cv[0]=0; vl[0]=0;
-        I_ReadSG('CVAR',cv,0,0); I_ReadSG('VALU',vl,0,0);
+        I_ReadSG('CVAR',cv,0,0); I_ReadSG('VALU',vl,0,0);   // always consume the pair to keep the stream aligned
         cv[sizeof(cv)-1]=0; vl[sizeof(vl)-1]=0;
-        // restore each saved archived cvar (g_spskill/difficulty, model/name/handicap) BEFORE the deferred
-        // efsptrans spawns the map, so the game reads save-time state at ge->Init, exactly like retail SV_ReadGame.
-        if(cv[0]) Cvar_Set(cv, vl);
+        // Restore each saved cvar (g_spskill/difficulty, model/name/handicap) BEFORE the deferred efsptrans
+        // spawns the map, so the game reads save-time state at ge->Init, exactly like retail SV_ReadGame.
+        // BUT filter the read side symmetrically with the write side (SP_SaveGameInternal now persists only
+        // CVAR_USERINFO -- the retail-9). Old pre-filter saves baked in ~240 CVAR_ARCHIVE cvars (every r_*/cg_*/
+        // cl_*/s_*/net_*...); Cvar_Set-ing those back CLOBBERS the device's live video/audio/input config to
+        // save-time values -- which then get re-archived into efspconfig.cfg and persist. On some GPUs (e.g.
+        // Mali-G52) a bad restored renderer-cvar combo (r_fbo/r_ext_multisample/r_renderScale/...) makes the
+        // Vulkan device fault (VK_ERROR_DEVICE_LOST) on the first frame, and it also silently re-overwrites any
+        // manual video-menu change the player makes. So restore ONLY true savegame cvars: those currently
+        // flagged CVAR_USERINFO (the retail-9, incl. g_spskill which is ARCHIVE|USERINFO), plus gameplay cvars
+        // the game DLL hasn't registered yet at this point in the load (nonexistent and not an engine namespace
+        // -- e.g. g_* set by ge->Init). Engine-owned display/audio/input/system cvars are skipped. This stays
+        // retail-faithful (retail only ever restored the 9) and does NOT change the save format -- old and new
+        // saves both load fine; only the no-business-in-a-save values are no longer applied.
+        if(cv[0]){
+            int fl = Cvar_Flags(cv);
+            qboolean exists = (fl != CVAR_NONEXISTENT);
+            qboolean engineNS =                                  // engine-owned namespaces (note the underscore)
+                !strncmp(cv,"r_",2)  || !strncmp(cv,"cg_",3) || !strncmp(cv,"cl_",3) ||
+                !strncmp(cv,"s_",2)  || !strncmp(cv,"snd_",4)|| !strncmp(cv,"com_",4)||
+                !strncmp(cv,"net_",4)|| !strncmp(cv,"in_",3) || !strncmp(cv,"cm_",3) ||
+                !strncmp(cv,"vid_",4)|| !strncmp(cv,"sv_",3) || !strncmp(cv,"ui_",3) ||
+                !strncmp(cv,"con_",4)|| !strncmp(cv,"vm_",3);
+            qboolean restore = ( exists && (fl & CVAR_USERINFO) ) || ( !exists && !engineNS );
+            if(restore) Cvar_Set(cv, vl);
+        }
     }
     // EFSP 4:3: re-assert the user's live aspect preference over whatever the save restored above (display
     // preference, not save state). The retail restore loop ran untouched; this just keeps the screen aspect
