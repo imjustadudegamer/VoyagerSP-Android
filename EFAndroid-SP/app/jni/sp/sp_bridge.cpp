@@ -140,10 +140,33 @@ static gentity_t *SP_GEntity( int num ){ return (gentity_t*)((unsigned char*)ge-
 
 // ----- world implementations -----
 static void W_LinkEntity( gentity_t *ent ){
-    // derive absmin/absmax from currentOrigin + mins/maxs
-    for(int i=0;i<3;i++){
-        ent->absmin[i] = ent->currentOrigin[i] + ent->mins[i] - 1;
-        ent->absmax[i] = ent->currentOrigin[i] + ent->maxs[i] + 1;
+    // derive absmin/absmax from currentOrigin + mins/maxs. A ROTATED brush model (non-zero
+    // currentAngles) must expand to a rotation-safe radius cube, exactly like retail SV_LinkEntity
+    // (efcode/server/sv_world.c). Otherwise the link box stays the entity's UNROTATED AABB, and once
+    // the piece tilts (e.g. dn5 'fallwalk'/'fallpillar' tipping over into a walkway, or any rotating
+    // door/mover) its real rotated extent falls outside that box, so the broad-phase cull in W_Trace /
+    // W_EntitiesInBox discards the entity and the player falls straight through the fallen catwalk.
+    // The narrow phase (CM_TransformedBoxTrace) already rotates by currentAngles; only this link box
+    // was missing the expansion. Applies on every map, so all rotating movers are covered.
+    if( ent->bmodel && ( ent->currentAngles[0] || ent->currentAngles[1] || ent->currentAngles[2] ) ){
+        // RadiusFromBounds (inlined; it's a C symbol and this is C++ -> avoid the linkage mismatch):
+        // the rotation-safe radius is the length of the per-axis max(|min|,|max|) corner.
+        vec3_t corner;
+        for(int i=0;i<3;i++){
+            float a = (ent->mins[i] < 0) ? -ent->mins[i] : ent->mins[i];
+            float b = (ent->maxs[i] < 0) ? -ent->maxs[i] : ent->maxs[i];
+            corner[i] = (a > b) ? a : b;
+        }
+        float rad = sqrtf( corner[0]*corner[0] + corner[1]*corner[1] + corner[2]*corner[2] );
+        for(int i=0;i<3;i++){
+            ent->absmin[i] = ent->currentOrigin[i] - rad - 1;
+            ent->absmax[i] = ent->currentOrigin[i] + rad + 1;
+        }
+    } else {
+        for(int i=0;i<3;i++){
+            ent->absmin[i] = ent->currentOrigin[i] + ent->mins[i] - 1;
+            ent->absmax[i] = ent->currentOrigin[i] + ent->maxs[i] + 1;
+        }
     }
     // Retail SV_LinkEntity area assignment (brush models only -- doors/breakables drive areaportals): collect
     // the leafs the entity spans; areanum = first real area, areanum2 = a distinct second area when it straddles
