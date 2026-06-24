@@ -799,6 +799,15 @@ void CL_DrawTouchControls( void ) {
 	if ( !tc_pillShader )
 		return;
 
+	// Start the idle timer the first time the overlay is actually drawn in active gameplay (this call
+	// site is already gated to CA_ACTIVE, no menu/console/cinematic), so the auto-hide works even for a
+	// controller-only player who never taps. Previously the idle window keyed solely off lastTouchMs,
+	// which stays 0 until the first touch -> a pure-gamepad session left the overlay on screen forever
+	// until the user tapped once. Counting from first draw gives every player a brief grace period to
+	// notice the controls, then hides them if no touch.
+	if ( !touchControl.overlayStartMs )
+		touchControl.overlayStartMs = Sys_Milliseconds();
+
 	// Auto-hide after 4s without touch so controller players aren't
 	// distracted. A finger actively holding the stick or a button keeps the
 	// overlay visible even when perfectly still (a held finger emits no
@@ -807,10 +816,15 @@ void CL_DrawTouchControls( void ) {
 	// Auto-hide keys off a finger PHYSICALLY HELD (moveActive / actionFingerHeld), NOT actionPressed --
 	// the crouch-toggle leaves its actionPressed bit set with no tracked finger, which used to pin the
 	// overlay on screen forever (user-confirmed: toggle+untoggle crouch made it hide again).
-	if ( !touchControl.moveActive && !touchControl.actionFingerHeld
-		&& touchControl.lastTouchMs
-		&& Sys_Milliseconds() - touchControl.lastTouchMs > 4000 )
-		return;
+	// idleRef = the more recent of (last touch, first-draw): controller-only players have lastTouchMs==0
+	// and fall back to overlayStartMs.
+	{
+		int idleRef = ( touchControl.lastTouchMs > touchControl.overlayStartMs )
+			? touchControl.lastTouchMs : touchControl.overlayStartMs;
+		if ( !touchControl.moveActive && !touchControl.actionFingerHeld
+			&& Sys_Milliseconds() - idleRef > 4000 )
+			return;
+	}
 
 	// --- movement stick: LCARS orange ring + gold thumb ---
 	if ( touchControl.moveActive ) {

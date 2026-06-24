@@ -67,6 +67,10 @@ typedef struct {
 	                          // pin the overlay on screen forever.
 	int      menuNavPressed;  // index into tcNavButtons, -1 = none
 	int      lastTouchMs;     // Sys_Milliseconds of last touch; touch UI auto-hides after idle
+	int      overlayStartMs;  // Sys_Milliseconds of the FIRST in-game overlay draw this session; the
+	                          // idle auto-hide counts from max(lastTouchMs, this) so a controller-only
+	                          // player (who never taps, lastTouchMs==0) still gets the overlay hidden
+	                          // ~4s after gameplay starts instead of it staying up until the first tap.
 	float    deviceW, deviceH; // PHYSICAL screen size (px); touch UI is anchored to
 	                           // this, not the in-game render resolution, so buttons
 	                           // don't move/distort when the game resolution changes.
