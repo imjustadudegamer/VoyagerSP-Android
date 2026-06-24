@@ -6,7 +6,16 @@
 #include "g_local.h"
 
 
-#define POOLSIZE	(2 * 1024 * 1024)
+// This is a single, never-freed bump allocator: g_entities
+// (MAX_GENTITIES * sizeof(gentity_t)) is carved out up front, and the rest
+// feeds per-spawn NPC/client/parm allocs for the whole map. The original 2MB
+// pool was sized for a 32-bit build; on 64-bit the wider pointers make
+// gentity_t and the per-spawn structs larger, so g_entities takes a much
+// bigger bite and leaves far less gameplay headroom -- spawn-heavy/long maps
+// (e.g. voy16) then hit "G_Alloc: failed" and ERR_DROP back to the main menu.
+// Enlarge the pool so the 64-bit build keeps comfortably more headroom. No
+// logic change.
+#define POOLSIZE	(4 * 1024 * 1024)
 
 static char		memoryPool[POOLSIZE];
 static int		allocPoint;
