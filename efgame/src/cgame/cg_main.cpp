@@ -923,11 +923,16 @@ static void CG_RegisterEffectMedia( void ) {
 	cgs.media.nukeModel					= cgi_R_RegisterModel ( "models/weaphits/nuke.md3" );
 	cgs.media.grenadeExplodeSnd			= cgi_S_RegisterSound( "sound/weapons/glauncher/explode.wav" );
 	cgs.media.grenadeAltExplodeSnd		= cgi_S_RegisterSound( "sound/weapons/glauncher/alt_explode.wav" );
+	cgs.media.grenadeBounce1			= cgi_S_RegisterSound( "sound/weapons/glauncher/bounce1.wav" );
+	cgs.media.grenadeBounce2			= cgi_S_RegisterSound( "sound/weapons/glauncher/bounce2.wav" );
 	cgs.media.missileStick				= cgi_S_RegisterSound( "sound/weapons/glauncher/alt_stick.wav" );
 
 	// --- WP_TETRION_DISRUPTOR / fx_tetrion.cpp ---
 	cgs.media.greenBurstShader			= cgi_R_RegisterShader( "gfx/misc/greenburst" );
 	cgs.media.greenTrailShader			= cgi_R_RegisterShader( "gfx/misc/greentrail" );
+	cgs.media.tetrionRicochet[0]		= cgi_S_RegisterSound( "sound/weapons/tetrion/ricochet1.wav" );
+	cgs.media.tetrionRicochet[1]		= cgi_S_RegisterSound( "sound/weapons/tetrion/ricochet2.wav" );
+	cgs.media.tetrionRicochet[2]		= cgi_S_RegisterSound( "sound/weapons/tetrion/ricochet3.wav" );
 
 	// --- WP_QUANTUM_BURST / fx_quantum.cpp ---
 	cgs.media.borgFlareShader			= cgi_R_RegisterShader( "gfx/misc/borgflare" );
@@ -940,6 +945,8 @@ static void CG_RegisterEffectMedia( void ) {
 	// --- WP_DREADNOUGHT / fx_dreadnought.cpp (the dn1 arc effect) ---
 	cgs.media.dnBoltShader				= cgi_R_RegisterShader( "gfx/misc/dnBolt" );
 	cgs.media.yellowTrailShader			= cgi_R_RegisterShader( "gfx/misc/yellowtrail" );
+	cgs.media.zappyShader				= cgi_R_RegisterShader( "gfx/misc/disint_1" );
+	cgs.media.electricBodyShader		= cgi_R_RegisterShader( "gfx/misc/electric" );
 
 	// --- WP_FORGE_PSYCH (avatar) / FX_avatar.cpp ---
 	cgs.media.psychicRingsShader		= cgi_R_RegisterShader( "gfx/misc/psychic_rings" );
@@ -963,6 +970,14 @@ static void CG_RegisterEffectMedia( void ) {
 	cgs.media.protonBeamShader			= cgi_R_RegisterShader( "textures/rig/protonbeam" );
 	cgs.media.protonRingShader			= cgi_R_RegisterShader( "textures/rig/protonring" );
 	cgs.media.protonAltBeamShader		= cgi_R_RegisterShader( "textures/rig/bw_energy_ripples" );
+
+	// --- WP_TRICORDER / cg_draw.cpp TED targeting display (drawn every frame the tricorder
+	//     HUD is up -- the persistent overlay that goes stale on later maps) ---
+	cgs.media.TEDshader					= cgi_R_RegisterShader( "gfx/2d/TED" );
+	cgs.media.pICONshader				= cgi_R_RegisterShader( "gfx/2d/picon" );
+	cgs.media.eICONshader				= cgi_R_RegisterShader( "gfx/2d/eTEDicon" );
+	cgs.media.aICONshader				= cgi_R_RegisterShader( "gfx/2d/aTEDicon" );
+	cgs.media.triRadarSound				= cgi_S_RegisterSound( "sound/movers/triradar.mp3" );
 
 	// --- TEAM_BORG / fx_borg.cpp, cg_event.cpp ---
 	cgs.media.borgBeamInSound			= cgi_S_RegisterSound( "sound/enemies/borg/borgbeam.wav" );
