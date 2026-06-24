@@ -847,6 +847,169 @@ void CG_PrecachePlayerGreetingSound( char *NPC_type )
 
 extern void NPC_Precache ( gentity_t *spawner );
 qboolean NPCsPrecached = qfalse;
+
+/*
+=================
+CG_RegisterEffectMedia
+
+EF1 SP: the FX/effect system (fx_*.cpp, FX_*.cpp, cg_effects/cg_localents/cg_env, and the
+EV_* handlers in cg_event.cpp) reads cgs.media.* handles UNCONDITIONALLY whenever an effect
+fires, but historically many of those handles were only registered inside the per-weapon
+switch in CG_RegisterWeapon() / the per-team switch in CG_RegisterNPCEffects(). Those switches
+only run for entities the map actually contains that carry a .client (NPCs) -- environmental
+and scripted effects (e.g. the Dreadnought arc on dn1 using dnBoltShader, debris chunks,
+beam-in effects) are NOT gated by a held weapon or a client NPC. cgs is memset only in
+CG_PreInit (DLL load, once), not per map, so on a mission where the triggering weapon/NPC is
+absent the handle keeps a STALE value from an earlier map -- now past the current map's
+tr.numShaders. The renderer then logs "R_GetShaderByHandle: out of range hShader 'N'" every
+frame and draws the default shader, and a stale/zero MODEL handle resolves to the MOD_BAD
+default model, which the backend draws as the red/green/blue debug axis (the "missing object"
+gizmo). The original code already worked around individual cases by hoisting some FX shaders
+into CG_RegisterGraphics (see the "leave it here for now" note below); this registers the rest
+of that class so any effect on any mission always has a valid current-map handle.
+
+Registering an already-loaded asset is cheap and idempotent, so calling this every map load is
+safe. Paths mirror the conditional registrations exactly (cg_weapons.cpp / cg_players.cpp).
+=================
+*/
+static void CG_RegisterEffectMedia( void ) {
+	int i;
+
+	// --- WP_PHASER / FX_Phaser.cpp ---
+	cgs.media.phaserShader				= cgi_R_RegisterShader( "gfx/misc/phaser" );
+	cgs.media.phaserFireShader			= cgi_R_RegisterShader( "gfx/misc/phaserbolt" );
+
+	// --- WP_COMPRESSION_RIFLE / FX_Compression.cpp, fx_proton.cpp, cg_env, prifle ---
+	cgs.media.prifleImpactShader		= cgi_R_RegisterShader( "gfx/effects/prifle_hit" );
+	cgs.media.compressionAltBlastShader	= cgi_R_RegisterShader( "gfx/effects/prifle_altblast2" );
+	cgs.media.compressionRingShader		= cgi_R_RegisterShader( "gfx/misc/compression_ring" );
+	cgs.media.disintegrateSound			= cgi_S_RegisterSound( "sound/weapons/prifle/disint.wav" );
+	cgs.media.disintegrate2Sound		= cgi_S_RegisterSound( "sound/weapons/prifle/disint2.wav" );
+	cgs.media.disintegrate3Sound		= cgi_S_RegisterSound( "sound/weapons/prifle/disint3.wav" );
+
+	// --- WP_IMOD / fx_imod.cpp ---
+	cgs.media.altImodExplosion			= cgi_R_RegisterShader( "electricalExplosionFast" );
+	cgs.media.IMODShader				= cgi_R_RegisterShader( "gfx/misc/IMOD" );
+	cgs.media.IMOD2Shader				= cgi_R_RegisterShader( "gfx/misc/IMOD2" );
+	cgs.media.altIMODShader				= cgi_R_RegisterShader( "gfx/misc/IMODalt" );
+	cgs.media.altIMOD2Shader			= cgi_R_RegisterShader( "gfx/misc/IMOD2alt" );
+	cgs.media.IMODendcapShader			= cgi_R_RegisterShader( "gfx/misc/IMODendcap" );
+	cgs.media.imodExplosionShader		= cgi_R_RegisterShader( "imodExplosion" );
+	cgs.media.altIMODEndcapShader		= cgi_R_RegisterShader( "gfx/misc/IMODalt_endcap" );
+
+	// --- WP_SCAVENGER / fx_scavenger.cpp (also tetrion BW variants) ---
+	cgs.media.tetrionTrail2Shader		= cgi_R_RegisterShader( "gfx/misc/trail2" );
+	cgs.media.tetrionFlareShader		= cgi_R_RegisterShader( "gfx/misc/tet1" );
+	cgs.media.scavengerAltShader		= cgi_R_RegisterShader( "gfx/misc/scavaltfire" );
+	cgs.media.scavExplosionFastShader	= cgi_R_RegisterShader( "scavExplosionFast" );
+	cgs.media.scavExplosionSlowShader	= cgi_R_RegisterShader( "scavExplosionSlow" );
+	cgs.media.redFlareShader			= cgi_R_RegisterShader( "gfx/misc/red_flare" );
+	cgs.media.redRingShader				= cgi_R_RegisterShader( "gfx/misc/red_ring" );
+	cgs.media.redRing2Shader			= cgi_R_RegisterShader( "gfx/misc/red_ring2" );
+	cgs.media.scavengerAltExplodeSnd	= cgi_S_RegisterSound( "sound/weapons/scavenger/alt_explode.wav" );
+	cgs.media.tetrionTrail2ShaderBW		= cgi_R_RegisterShader( "gfx/misc/trail2BW" );
+	cgs.media.tetrionFlareShaderBW		= cgi_R_RegisterShader( "gfx/misc/tet1BW" );
+	cgs.media.redFlareShaderBW			= cgi_R_RegisterShader( "gfx/misc/red_flareBW" );
+	cgs.media.redRingShaderBW			= cgi_R_RegisterShader( "gfx/misc/red_ringBW" );
+
+	// --- WP_STASIS / FX_Stasis.cpp ---
+	cgs.media.stasisRingShader			= cgi_R_RegisterShader( "gfx/misc/stasis_ring" );
+	cgs.media.stasisAltShader			= cgi_R_RegisterShader( "gfx/misc/stasis_altfire" );
+
+	// --- WP_GRENADE_LAUNCHER / FX_Grenade_Launcher.cpp ---
+	cgs.media.bigShockShader			= cgi_R_RegisterShader( "gfx/misc/bigshock" );
+	cgs.media.orangeRingShader			= cgi_R_RegisterShader( "gfx/misc/orangering" );
+	cgs.media.orangeTrailShader			= cgi_R_RegisterShader( "gfx/misc/orangetrail" );
+	cgs.media.nukeModel					= cgi_R_RegisterModel ( "models/weaphits/nuke.md3" );
+	cgs.media.grenadeExplodeSnd			= cgi_S_RegisterSound( "sound/weapons/glauncher/explode.wav" );
+	cgs.media.grenadeAltExplodeSnd		= cgi_S_RegisterSound( "sound/weapons/glauncher/alt_explode.wav" );
+	cgs.media.missileStick				= cgi_S_RegisterSound( "sound/weapons/glauncher/alt_stick.wav" );
+
+	// --- WP_TETRION_DISRUPTOR / fx_tetrion.cpp ---
+	cgs.media.greenBurstShader			= cgi_R_RegisterShader( "gfx/misc/greenburst" );
+	cgs.media.greenTrailShader			= cgi_R_RegisterShader( "gfx/misc/greentrail" );
+
+	// --- WP_QUANTUM_BURST / fx_quantum.cpp ---
+	cgs.media.borgFlareShader			= cgi_R_RegisterShader( "gfx/misc/borgflare" );
+	cgs.media.quantumExplosionShader	= cgi_R_RegisterShader( "quantumExplosion" );
+	cgs.media.quantumFlashShader		= cgi_R_RegisterShader( "yellowflash" );
+	cgs.media.shockRingShader			= cgi_R_RegisterShader( "gfx/misc/shockring" );
+	cgs.media.quantumRingShader			= cgi_R_RegisterShader( "gfx/misc/detpack3" );
+	cgs.media.quantumBoom				= cgi_S_RegisterSound ( "sound/weapons/explosions/explode5.wav" );
+
+	// --- WP_DREADNOUGHT / fx_dreadnought.cpp (the dn1 arc effect) ---
+	cgs.media.dnBoltShader				= cgi_R_RegisterShader( "gfx/misc/dnBolt" );
+	cgs.media.yellowTrailShader			= cgi_R_RegisterShader( "gfx/misc/yellowtrail" );
+
+	// --- WP_FORGE_PSYCH (avatar) / FX_avatar.cpp ---
+	cgs.media.psychicRingsShader		= cgi_R_RegisterShader( "gfx/misc/psychic_rings" );
+
+	// --- WP_BORG_WEAPON / fx_borg.cpp ---
+	cgs.media.borgRingShader			= cgi_R_RegisterShader( "gfx/misc/borgring" );
+
+	// --- WP_DESPERADO (rifle) / fx_scavenger.cpp ricochets ---
+	cgs.media.rifleHitSound				= cgi_S_RegisterSound( "sound/weapons/rifle/hit.wav" );
+	cgs.media.ric1Sound					= cgi_S_RegisterSound( "sound/weapons/rifle/ric1.wav" );
+	cgs.media.ric2Sound					= cgi_S_RegisterSound( "sound/weapons/rifle/ric2.wav" );
+	cgs.media.ric3Sound					= cgi_S_RegisterSound( "sound/weapons/rifle/ric3.wav" );
+	cgs.media.ric4Sound					= cgi_S_RegisterSound( "sound/weapons/rifle/ric4.wav" );
+	cgs.media.ric5Sound					= cgi_S_RegisterSound( "sound/weapons/rifle/ric5.wav" );
+	cgs.media.ric6Sound					= cgi_S_RegisterSound( "sound/weapons/rifle/ric6.wav" );
+
+	// --- WP_ARC_WELDER / crossbow / fx_scavenger.cpp ---
+	cgs.media.arrowMissSound			= cgi_S_RegisterSound( "sound/weapons/crossbow/miss.wav" );
+
+	// --- WP_PROTON (reaver) / fx_proton.cpp ---
+	cgs.media.protonBeamShader			= cgi_R_RegisterShader( "textures/rig/protonbeam" );
+	cgs.media.protonRingShader			= cgi_R_RegisterShader( "textures/rig/protonring" );
+	cgs.media.protonAltBeamShader		= cgi_R_RegisterShader( "textures/rig/bw_energy_ripples" );
+
+	// --- TEAM_BORG / fx_borg.cpp, cg_event.cpp ---
+	cgs.media.borgBeamInSound			= cgi_S_RegisterSound( "sound/enemies/borg/borgbeam.wav" );
+	cgs.media.borgShieldShader			= cgi_R_RegisterShader( "borgShield" );
+	cgs.media.borgRecycleSound			= cgi_S_RegisterSound( "sound/enemies/borg/borgrecycle.wav" );
+	cgs.media.spark1Sound				= cgi_S_RegisterSound( "sound/ambience/spark1.wav" );
+	cgs.media.spark2Sound				= cgi_S_RegisterSound( "sound/ambience/spark2.wav" );
+	cgs.media.spark3Sound				= cgi_S_RegisterSound( "sound/ambience/spark3.wav" );
+	cgs.media.spark4Sound				= cgi_S_RegisterSound( "sound/ambience/spark4.wav" );
+	cgs.media.spark5Sound				= cgi_S_RegisterSound( "sound/ambience/spark5.wav" );
+	cgs.media.spark6Sound				= cgi_S_RegisterSound( "sound/ambience/spark6.wav" );
+
+	// --- TEAM_FORGE / fx_transporter.cpp, cg_event.cpp ---
+	cgs.media.forgeBeaminSound			= cgi_S_RegisterSound( "sound/movers/armytransin.mp3" );
+	cgs.media.forgeRemoveShader			= cgi_R_RegisterShader( "gfx/misc/forge_fade" );
+	cgs.media.forgeRemovalSound			= cgi_S_RegisterSound( "sound/enemies/remove.wav" );
+
+	// --- TEAM_8472 / fx_transporter.cpp ---
+	cgs.media.speciesPortalShader		= cgi_R_RegisterShader( "gfx/effects/species_portal" );
+	cgs.media.portalFlareShader			= cgi_R_RegisterShader( "gfx/effects/portal_flare" );
+	cgs.media.speciesBeaminSound		= cgi_S_RegisterSound( "sound/enemies/species8472/8472in.wav" );
+	cgs.media.speciesBeamoutSound		= cgi_S_RegisterSound( "sound/enemies/species8472/8472out.wav" );
+
+	// --- TEAM_SCAVENGER / cg_ents.cpp, cg_event.cpp ---
+	cgs.media.scavBeamInSound			= cgi_S_RegisterSound( "sound/enemies/scav/transout.wav" );
+	cgs.media.scavTransportShader		= cgi_R_RegisterShader( "powerups/scavBeamEffect" );
+
+	// --- TEAM_STASIS / cg_event.cpp ---
+	cgs.media.stasisBeamInSound			= cgi_S_RegisterSound( "sound/movers/stasistransporter.wav" );
+	cgs.media.stasisAppearSound			= cgi_S_RegisterSound( "sound/enemies/etherians/appear.wav" );
+	cgs.media.stasisBeamOutSound		= cgi_S_RegisterSound( "sound/ambience/stasis/intostasis.wav" );
+
+	// --- hunter-seeker / scout-bot / war-bot debris (fx_hunter_seeker.cpp); stale MODEL handles
+	//     here are what render as the red/green/blue MOD_BAD axis gizmo ---
+	cgs.media.hunterSeekerHoverSound	= cgi_S_RegisterSound( "sound/enemies/hunter/hover.wav" );
+	cgs.media.warriorBotChunks[0]		= cgi_R_RegisterModel( "models/chunks/warriorbot/head.md3" );
+	cgs.media.warriorBotChunks[1]		= cgi_R_RegisterModel( "models/chunks/warriorbot/turret.md3" );
+	cgs.media.warriorBotChunks[2]		= cgi_R_RegisterModel( "models/chunks/warriorbot/foot.md3" );
+	cgs.media.warriorBotChunks[3]		= cgi_R_RegisterModel( "models/chunks/warriorbot/arm.md3" );
+	cgs.media.warriorBotChunks[4]		= cgi_R_RegisterModel( "models/chunks/warriorbot/leg.md3" );
+	cgs.media.warbotExplodeSounds[0]	= cgi_S_RegisterSound( "sound/enemies/warbot/explode1.wav" );
+	cgs.media.warbotExplodeSounds[1]	= cgi_S_RegisterSound( "sound/enemies/warbot/explode2.wav" );
+	for ( i = 0; i < 3; i++ ) {
+		cgs.media.scoutbotExplodeSounds[i] = cgi_S_RegisterSound( va("sound/enemies/scoutbot/explode%i.mp3", i+1 ) );
+	}
+}
+
 /*
 =================
 CG_PrepRefresh
@@ -925,7 +1088,12 @@ static void CG_RegisterGraphics( void ) {
 	for ( i = 0; i < 4; i++ ) {
 		cgs.media.borgLightningShaders[i] = cgi_R_RegisterShader( va( "gfx/misc/blightning%i", i+1 ) );
 	}
-	
+
+	// EF1 SP: register the rest of the FX/effect media unconditionally every map so effects that
+	// fire without a held weapon / client NPC present (env arcs, debris, beam-ins) never reference
+	// a stale handle from a prior map. See CG_RegisterEffectMedia for the full rationale.
+	CG_RegisterEffectMedia();
+
 	cgs.media.solidWhiteShader			= cgi_R_RegisterShader( "white2" );
 	
 	cgs.media.whiteRingShader			= cgi_R_RegisterShader( "gfx/misc/whitering" );
