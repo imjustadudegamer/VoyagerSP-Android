@@ -618,7 +618,7 @@ G_CreateFormation
 void G_CreateFormation( gentity_t *self )
 {
 	gentity_t	*found = NULL, *last;
-	int			num = 0, i, j;
+	int			i, j;
 
 	//Must be a valid target
 	if( ( self == NULL ) || ( self->client == NULL ) )
@@ -627,6 +627,32 @@ void G_CreateFormation( gentity_t *self )
 	//Must have a squad name
 	if( VALIDSTRING( self->client->squadname ) == false )
 		return;
+
+	// Restore a roster member's squadname if a load path lost it. squadname is set per-map by
+	// SET_SQUADNAME (not a spawn key); a transition-autosave can reload a member with squadname
+	// NULL, which fails the enlist test below. squadPaths are the authoritative roster, so an
+	// NPC whose script_targetname matches a squadPath ownername is a member: restore its name
+	// from the (player) leader. Only fires for a NULL-name NPC that matches a squadPath.
+	if ( VALIDSTRING( self->client->squadname ) )
+	{
+		for ( found = &g_entities[1], j = 1; j < ENTITYNUM_WORLD; j++, found++ )
+		{
+			if ( !found || !found->client || !found->NPC || found->health <= 0 )
+				continue;
+			if ( VALIDSTRING( found->client->squadname ) )			// already has one -> leave it
+				continue;
+			if ( VALIDSTRING( found->script_targetname ) == false )
+				continue;
+			for ( i = 0; i < num_squad_paths; i++ )
+			{
+				if ( Q_stricmp( found->script_targetname, squadPaths[i].ownername ) == 0 )
+				{
+					found->client->squadname = G_NewString( self->client->squadname );
+					break;
+				}
+			}
+		}
+	}
 
 	//assign all the followers:
 	last = self;
@@ -668,20 +694,10 @@ void G_CreateFormation( gentity_t *self )
 			}
 		}
 
-		//See if we succeeded putting them on a path
-		if ( found->NPC->iSquadPathIndex == -1 )
+		//See if we succeeded putting them on a path; only enlist when we did
+		//(no squadPath -> index stays -1 -> member is left unlinked, exactly as retail).
+		if ( found->NPC->iSquadPathIndex != -1 )
 		{
-			//FIXME: What to do if they don't have a squadpath?  Just follow player and keep a distance?
-			//FIXME: Emit this warning properly
-#ifndef FINAL_BUILD
-			gi.Printf("No squadPath for %s\n", found->script_targetname);
-#endif//FINAL_BUILD
-		}
-		else
-		{
-			//New member added
-			num++;
-
 			//link them up
 			last->client->follower = found;
 			found->client->leader = last;
@@ -703,21 +719,12 @@ void G_CreateFormation( gentity_t *self )
 			found->NPC->scriptFlags |= SCF_CAREFUL;//Set them to always use walk2/stand2/run2
 			VectorClear(found->NPC->leaderTeleportSpot);
 		}
-		
+
 		last = found;
 	}
 
 	//Set ourself as the team leader
 	self->client->team_leader = self;
-
-	//Debug warning
-	if ( num == 0 )
-	{
-		//FIXME: Or... this means that no one was around to form up
-#ifndef FINAL_BUILD
-		gi.Printf( S_COLOR_RED"ERROR: formation %s could not be formed!\n", self->client->squadname );
-#endif//FINAL_BUILD
-	}
 }
 
 /*
