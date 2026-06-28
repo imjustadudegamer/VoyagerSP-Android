@@ -474,6 +474,19 @@ static int ReadChunk( unsigned long c, void *addr, int len, void **pp, qboolean 
 }
 static int I_ReadSG   ( unsigned long c, void *d, int l, void **p ){ return ReadChunk(c,d,l,p,qfalse); }
 static int I_ReadSGOpt( unsigned long c, void *d, int l, void **p ){ return ReadChunk(c,d,l,p,qtrue ); }
+// gi.WriteCam: retail's engine appends a camera ref_tag line to "cameras.map" (developer
+// camera-path recording, triggered by the "writecam" console command -> CG_WriteCam_f ->
+// gi.WriteCam, cg_consolecmds.cpp). The bridge previously left this game_import_t slot NULL
+// (memset 0), so invoking "writecam" (via cfg/bind; the SP build has no console) would
+// NULL-deref. Implemented faithfully: append the text to cameras.map.
+static void I_WriteCam( const char *text ){
+    if(!text || !text[0]) return;
+    fileHandle_t f = 0;
+    FS_FOpenFileByMode("cameras.map", &f, FS_APPEND);
+    if(!f) return;
+    FS_Write(text, (int)strlen(text), f);
+    FS_FCloseFile(f);
+}
 // Sized to MAX_GENTITIES (1024): the game reads gi.S_Override[ent->s.number] for ANY entity, and
 // EF missions have many voiced NPCs at high entity numbers (borg1 alone spawns 561) — a [256] array
 // read out of bounds and could stall a character's dialog. Lots of voices/characters need the full range.
@@ -546,6 +559,7 @@ extern "C" qboolean SP_LoadGame( const char *solib ){
     gi.FS_FOpenFile=FS_FOpenFileByMode; gi.FS_Read=FS_Read; gi.FS_Write=FS_Write; gi.FS_FCloseFile=FS_FCloseFile;
     gi.FS_ReadFile=I_FS_ReadFile; gi.FS_FreeFile=FS_FreeFile; gi.FS_GetFileList=FS_GetFileList;
     gi.AppendToSaveGame=I_Append; gi.ReadFromSaveGame=I_ReadSG; gi.ReadFromSaveGameOptional=I_ReadSGOpt;
+    gi.WriteCam=I_WriteCam;
     gi.SendConsoleCommand=I_SendConsole; gi.DropClient=I_DropClient; gi.SendServerCommand=I_SendServerCmd;
     gi.SetConfigstring=I_SetCS; gi.GetConfigstring=I_GetCS;
     gi.GetUserinfo=I_GetUserinfo; gi.SetUserinfo=I_SetUserinfo; gi.GetServerinfo=I_GetServerinfo;
