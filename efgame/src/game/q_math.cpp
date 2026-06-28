@@ -538,13 +538,19 @@ void VectorRotate( vec3_t in, vec3_t matrix[3], vec3_t out )
 */
 float Q_rsqrt( float number )
 {
-	long i;
+	// LP64 FIX: this bit-hack reinterprets the 4-byte float `y` as an integer, so the
+	// integer MUST be exactly 4 bytes. Retail used `long`, which is 4 bytes on Win32/armv7
+	// (ILP32) but 8 bytes on arm64 (LP64) -> `*(long*)&y` read 4 bytes of `y` plus 4 bytes
+	// of adjacent stack, and the `>> 1` ran on a 64-bit value -> garbage results (only
+	// "correct" when the stray high bit happened to be 0). `int` is 32-bit on both ABIs.
+	// (Q_fabs just below already uses `int` for the same reason.)
+	int i;
 	float x2, y;
 	const float threehalfs = 1.5F;
 
 	x2 = number * 0.5F;
 	y  = number;
-	i  = * ( long * ) &y;						// evil floating point bit level hacking
+	i  = * ( int * ) &y;						// evil floating point bit level hacking
 	i  = 0x5f3759df - ( i >> 1 );               // what the fuck?
 	y  = * ( float * ) &i;
 	y  = y * ( threehalfs - ( x2 * y * y ) );   // 1st iteration
