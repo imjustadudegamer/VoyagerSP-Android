@@ -870,11 +870,14 @@ static void vk_create_render_passes( void )
 	// the offscreen color image and SAMPLING it (gamma/bloom passes read it
 	// through a sampler, not as an input attachment). Sampled reads can fetch
 	// any texel, so the dependency must be framebuffer-GLOBAL —
-	// VK_DEPENDENCY_BY_REGION_BIT here is a spec violation that Mali happens
-	// to forgive but a binning GPU (Adreno 5xx) does not: tile stores were not
-	// globally visible to the gamma pass's texture fetches, producing
-	// horizontal bands of stale data across the whole frame (seen on
-	// Adreno 530, driver 512.384).
+	// VK_DEPENDENCY_BY_REGION_BIT here UNDER-SYNCHRONIZES (a framebuffer-local
+	// dependency, valid only for input-attachment reads at the same (x,y)).
+	// It is not a VUID violation a validation layer catches; it just yields
+	// undefined results. Mali happens to forgive it but a binning GPU
+	// (Adreno 5xx) does not: tile stores were not globally visible to the
+	// gamma pass's texture fetches, producing horizontal bands of stale data
+	// across the whole frame (seen on Adreno 530, driver 512.384). Hence
+	// dependencyFlags = 0 (global) below.
 	deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
 	deps[0].dstSubpass = 0;
 	deps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;			// What pipeline stage must have completed for the dependency
@@ -6757,9 +6760,11 @@ VkPipeline create_pipeline( const Vk_Pipeline_Def *def, renderPass_t renderPassI
 
 	// POST_BLOOM pipelines render inside the single-sample post-bloom pass —
 	// building them with the main pass's MSAA sample count (as upstream does)
-	// is a render-pass compatibility violation that Mali forgives but Adreno
-	// renders as banded garbage (every 2D/UI draw lands in this pass when
-	// bloom is active).
+	// is undefined behavior: rasterizationSamples must equal the sample count
+	// of the subpass attachments at pipeline creation, and a pipeline bound in
+	// a pass it isn't render-pass-compatible with is illegal. Mali forgives it
+	// but Adreno renders banded garbage (every 2D/UI draw lands in this pass
+	// when bloom is active). UB permits any outcome, up to DEVICE_LOST.
 	if ( renderPassIndex == RENDER_PASS_SCREENMAP )
 		multisample_state.rasterizationSamples = vk.screenMapSamples;
 	else if ( renderPassIndex == RENDER_PASS_POST_BLOOM )
@@ -6818,13 +6823,15 @@ VkPipeline create_pipeline( const Vk_Pipeline_Def *def, renderPass_t renderPassI
 	}
 
 	// The post-bloom pass is color-only (no depth/stencil attachment, see
-	// vk_create_render_passes): pipelines bound inside it must not enable
-	// depth or stencil operations, or behavior is undefined per the spec.
-	// EF's cgame draws additional 3D scenes after bloom has run (scoreboard
-	// player heads, match-intro overlays) and on Mali the depth-enabled
-	// draws corrupted the entire color attachment with uninitialized-memory
-	// garbage (boot-dependent white screen on foggy-void views). Depth-less
-	// rendering of those small models is visually negligible.
+	// vk_create_render_passes). Per spec, pDepthStencilState is IGNORED when
+	// the subpass has no depth/stencil attachment, so enabling depth/stencil
+	// here is a well-defined no-op, NOT undefined behavior. We force it off
+	// anyway to work around a real Mali driver defect: EF's cgame draws
+	// additional 3D scenes after bloom has run (scoreboard player heads,
+	// match-intro overlays) and on Mali the depth-enabled draws corrupted the
+	// entire color attachment with uninitialized-memory garbage (boot-dependent
+	// white screen on foggy-void views). Depth-less rendering of those small
+	// models is visually negligible.
 	if ( renderPassIndex == RENDER_PASS_POST_BLOOM ) {
 		depth_stencil_state.depthTestEnable = VK_FALSE;
 		depth_stencil_state.depthWriteEnable = VK_FALSE;
