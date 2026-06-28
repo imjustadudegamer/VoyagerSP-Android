@@ -923,8 +923,22 @@ void SCR_DrawScreenField( stereoFrame_t stereoFrame ) {
 	// CA_CONNECTING..CA_ACTIVE window. Suppress all of that and show the real per-map SP
 	// levelshot instead (cold-boot New Game, maptransition, loadtransition, load all hit this).
 	if ( SP_IsLoading() ) {
-		SP_DrawLoadingScreen();
-		Con_DrawConsole();        // keep the console reachable during load
+		// EF1 SP 1:1: when the SP cgame is driving this redraw (cgi_UpdateScreen during CG_INIT, via
+		// SP_PumpLoadScreen), present its real CG_DrawInformation — levelshot + animated LCARS load bar +
+		// quoted level name — exactly like retail. Outside that re-entrant pump (e.g. a stray engine frame
+		// before CG_INIT, when the cgame can't draw yet) fall back to the static levelshot.
+		extern int  SP_LoadPumping( void );
+		extern void SP_DrawCGameLoad( void );
+		if ( SP_LoadPumping() )
+			SP_DrawCGameLoad();
+		else
+			SP_DrawLoadingScreen();
+		// Do NOT draw the console over the load screen. New Game / Tutorial / load-from-save all start from the
+		// menu, so the SP load runs at clc.state==CA_DISCONNECTED — and Con_DrawConsole force-draws the FULL-SCREEN
+		// startup console in that state (Con_DrawSolidConsole(1.0)), burying the levelshot + LCARS bar under console
+		// text, the version string and the input prompt. Retail draws no console over the loading screen. (Forward
+		// transitions run at CA_ACTIVE, where Con_DrawConsole only emits fading notify lines — which is why this bug
+		// showed ONLY on the menu-initiated loads.)
 		return;                   // re.EndFrame() is issued by the SCR_UpdateScreen caller
 	}
 
@@ -1045,8 +1059,12 @@ void SCR_DrawScreenField( stereoFrame_t stereoFrame ) {
 	}
 #endif
 
+	// EF1 SP: on the save-thumbnail capture frame, skip the menu overlay for this ONE frame so the captured
+	// 'SHOT' is the clean game view (the frozen game was already drawn above), not the pause menu over it.
+	// One-shot: consumed every frame (normally 0); the menu reappears next frame (~1 frame later).
+	int spSuppressMenu = SP_TakeMenuSuppress();
 	// the menu draws next
-	if ( Key_GetCatcher( ) & KEYCATCH_UI && ( uivm || SPUI_IsActive() ) ) {
+	if ( Key_GetCatcher( ) & KEYCATCH_UI && ( uivm || SPUI_IsActive() ) && !spSuppressMenu ) {
 #ifdef USE_FLEXIBLE_DISPLAY
 		if ( cls.syncUICursor ) {
 			IN_SyncMousePosition();
@@ -1097,7 +1115,10 @@ void SCR_UpdateScreen( void ) {
 	// If there is no VM, there are also no rendering commands issued. Stop the renderer in
 	// that case. EF1 SP: the native SP UI has NO uivm (uivm==NULL) but DOES render via SPUI_*,
 	// so SPUI_IsActive() must also enable the render path or the whole screen stays black.
-	if( uivm || SPUI_IsActive() || com_dedicated->integer )
+	// EF1 SP: during a map load the SP UI is torn down (uivm==NULL, SPUI inactive), but the SP cgame still
+	// drives load-screen redraws (cgi_UpdateScreen -> SP_PumpLoadScreen -> SCR_UpdateScreen). Keep the render
+	// path enabled while a load is in flight so the 1:1 LCARS load screen actually presents.
+	if( uivm || SPUI_IsActive() || com_dedicated->integer || SP_IsLoading() )
 	{
 		// XXX
 		int in_anaglyphMode = Cvar_VariableIntegerValue("r_anaglyphMode");

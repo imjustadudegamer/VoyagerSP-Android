@@ -32,6 +32,13 @@ void SP_BeginLoad(const char* map);   // mark load start + remember map for the 
 void SP_EndLoad(void);                // SP cgame is now active; stop drawing the load screen
 int  SP_IsLoading(void);              // 1 while an SP map load is in flight
 void SP_DrawLoadingScreen(void);      // draw levelshots/<map> fullscreen (renderer-independent)
+// EF1 SP 1:1 loading screen: the cgame drives the animated LCARS load art via cgi_UpdateScreen during CG_INIT.
+void SP_PumpLoadScreen(void);         // cgame requested a redraw -> present one cgame-drawn load frame
+int  SP_LoadPumping(void);            // 1 while inside SP_PumpLoadScreen (cgame load frame, not static fallback)
+void SP_DrawCGameLoad(void);          // re-enter the live cgame -> CG_DrawInformation (bridge, sp_bridge.cpp)
+// Save-thumbnail clean capture: hide the menu overlay for the one frame the thumbnail is read back.
+void SP_ArmMenuSuppress(void);        // SP_DrawFrame: arm on the capture frame
+int  SP_TakeMenuSuppress(void);       // SCR_DrawScreenField: 1 = skip the menu overlay this frame (one-shot)
 
 #ifdef __cplusplus
 }

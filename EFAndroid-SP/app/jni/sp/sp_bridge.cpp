@@ -29,6 +29,8 @@ static void blog( const char *fmt, ... ){ va_list a; va_start(a,fmt); __android_
 
 // ---- lilium engine services (resolved at link against the engine objects) ----
 extern "C" {
+    void  SP_PumpLoadScreen( void );   // sp_integration.c: drive the 1:1 cgame load screen on cgi_UpdateScreen
+    void  SP_ArmMenuSuppress( void );  // sp_integration.c: hide the menu 1 frame for a clean save-thumbnail capture
     int   Sys_Milliseconds( void );
     int   Cmd_Argc( void );
     char *Cmd_Argv( int arg );
@@ -106,6 +108,13 @@ static int SP_EntNum( gentity_t *e ){ return (int)(((unsigned char*)e - (unsigne
 
 #define CS_MAX 1024
 static char g_configstrings[CS_MAX][1024];
+
+// EF1 SP 1:1 load-from-save background: the loaded savegame's 256x256 RGBA 'SHOT' screenshot, stashed by
+// SP_LoadGameFile so the loading screen's cgi_R_DrawScreenShot (CG_DrawInformation's eFULL branch) can blit it
+// fullscreen behind the LCARS bar — exactly as retail's engine draws its stored 'SHOT' buffer (unk_575034).
+// Bottom-up like the save-menu thumbnail; the cgame passes a negative height so RB_StretchPic flips it upright.
+static unsigned char g_loadShot[256*256*4];
+static int           g_loadShotValid = 0;
 
 // server->client command channel (subtitles, objectives, centerprints, music...). The game calls
 // gi.SendServerCommand; the cgame pulls them by sequence via CG_GETSERVERCOMMAND up to the snapshot's
@@ -941,7 +950,14 @@ static intptr_t SP_CgameSyscall( intptr_t cmd, ... ){
         // exactly as SP_ClientCommand does. Was stubbed -> these commands silently did nothing.
         if(ge && g_spActive){ Cmd_TokenizeString((const char*)P(0)); ge->ClientCommand(0); }
         return 0;
-    case CG_UPDATESCREEN:  return 0;
+    case CG_UPDATESCREEN:
+        // EF1 SP 1:1 loading screen: during CG_INIT the cgame calls cgi_UpdateScreen at every load stage
+        // (CG_LoadingString, which bumps cg.loadLCARSStage). Retail routes that through SCR_UpdateScreen back
+        // into the cgame's own CG_DrawInformation -> animated LCARS load bar + levelshot + quoted level name.
+        // Drive that same path here so the load screen actually animates, instead of dropping the redraw (this
+        // was a silent no-op -> the port showed no loading art between levels).
+        SP_PumpLoadScreen();
+        return 0;
     // collision -> reuse engine CM (world)
     case CG_CM_LOADMAP:    return 0;   // already loaded server-side
     case CG_CM_NUMINLINEMODELS: return CM_NumInlineModels();
@@ -1040,7 +1056,15 @@ static intptr_t SP_CgameSyscall( intptr_t cmd, ... ){
     // -1 (NOT 0) is required: g_mover.cpp G_PlayDoorSound only early-outs on -1; returning 0 would fire
     // G_AddEvent(EV_BMODEL_SOUND, 0) (bogus sfx-handle-0) on every door. Retail: AS_GetBModelSound.
     case CG_AS_GETBMODELSOUND: return SP_AS_GetBModelSound((const char*)P(0),(int)A(1));
-    case CG_R_DRAWSCREENSHOT: return 0;   // loading-screen savegame thumbnail; re has no capture -> cosmetic
+    case CG_R_DRAWSCREENSHOT:
+        // EF1 SP 1:1: on a full-save load (g_eSavedGameJustLoaded==eFULL) CG_DrawInformation draws the saved
+        // screenshot behind the LCARS load bar via this trap. Retail keeps the save's 'SHOT' chunk as a 256x256
+        // RGBA texture and blits it fullscreen, opaque, vertically flipped. The cgame passes (0, vidHeight,
+        // vidWidth, -vidHeight): the negative height makes RB_StretchPic flip our bottom-up 'SHOT' upright (the
+        // exact path the save menu uses for its thumbnail). g_loadShot is populated on load (SP_LoadGameFile).
+        if( g_loadShotValid )
+            SPR_DrawStretchRaw((int)VMF(0),(int)VMF(1),(int)VMF(2),(int)VMF(3), 256, 256, g_loadShot);
+        return 0;
     default: return 0;
     }
 }
@@ -1446,6 +1470,10 @@ extern "C" void SP_LoadGameFile(const char* name){
     // exist in retail saves anyway, so this is purely a port display-layer guard around an unmodified save read.
     char aspectPref[16]; aspectPref[0]=0; Cvar_VariableStringBuffer("cg_forceAspect", aspectPref, sizeof(aspectPref));
     I_ReadSG('COMM', comm,128,0); I_ReadSG('SHOT', shot,256*256*4,0); I_ReadSG('MPCM', mpcm,1024,0);
+    // EF1 SP 1:1 load-from-save background: stash the save's screenshot so the loading screen can blit it behind
+    // the LCARS bar (CG_DrawInformation's eFULL branch -> CG_R_DRAWSCREENSHOT). Retail's engine likewise copies
+    // the 'SHOT' chunk into its persistent draw buffer on every load. Bottom-up 256x256 RGBA; drawn flipped.
+    memcpy(g_loadShot, shot, sizeof(g_loadShot)); g_loadShotValid = 1;
     I_ReadSG('CVCN', &ncvc,4,0);                              // M-1: retail's archived-cvar count FourCC (was 'NCVC')
 #ifndef CVAR_NONEXISTENT
 #define CVAR_NONEXISTENT 0x80000000   // engine Cvar_Flags() sentinel; absent from the 2000-era game q_shared.h
@@ -1610,6 +1638,18 @@ extern "C" void SP_ClientFrames(int n){
     blog("SP_ClientFrames: drew %d cgame frames to levelTime=%d (numEntities=%d)\n", n, g_levelTime, g_snap.numEntities);
 }
 
+// EF1 SP 1:1 loading screen: present one cgame-drawn load frame. CG_DRAW_ACTIVE_FRAME early-returns into
+// CG_DrawInformation (cg_info.cpp) whenever cg.infoScreenText is set (CG_LoadingString sets it at each load
+// stage) -> the real levelshot + animated LCARS bar (driven by cg.loadLCARSStage) + the quoted level name
+// (CS_MESSAGE). This is exactly what retail's engine drives via trap_UpdateScreen during CG_INIT; the cgame is
+// alive here (we are inside the g_vmMain(CG_INIT) call that requested the redraw via cgi_UpdateScreen), so
+// re-entering it to draw is retail-faithful and side-effect free (CG_BuildSolidList/CG_UpdateCvars guard on
+// cg.snap, identical to retail's info-screen path). Called only from SCR_DrawScreenField while a load is pumping.
+extern "C" void SP_DrawCGameLoad(void){
+    if(!g_vmMain) return;
+    g_vmMain(CG_DRAW_ACTIVE_FRAME, g_levelTime, 0 /*STEREO_CENTER*/, qfalse);
+}
+
 extern "C" int SP_IsActive(void){ return g_spActive; }
 // Route-b: the bridge replaced the engine server, so the engine's SV_GameCommand (gated on
 // sv.state==SS_GAME) never fires -> the game's exported ConsoleCommand (g_svcmds.cpp: use/nav/npc/
@@ -1671,7 +1711,12 @@ extern "C" void SP_DrawFrame(int serverTime, int stereo){
             // second). The capture is a full-screen GPU readback that stalls the Adreno pipeline ~100ms;
             // doing it per-second during play was the dominant stutter. You only save from this menu, so a
             // single capture on menu-open is enough and its one-time hitch is hidden by the transition.
-            SPR_RequestSaveThumb(); }
+            // EF1 SP: capture a CLEAN game frame for the save thumbnail. The capture reads the framebuffer at
+            // end-of-frame (after the menu would draw), so arm a one-frame menu suppression: the frozen game is
+            // drawn (CG_DRAW_ACTIVE_FRAME below) but the pause menu is skipped for this frame -> the readback is
+            // just the game, not the menu over it. Was capturing menu+game; the saved 'SHOT' showed the menu.
+            SPR_RequestSaveThumb(); SP_ArmMenuSuppress();
+            blog("EFSP: save-thumbnail capture armed (menu suppressed 1 frame for a clean game shot)\n"); }
         // Freeze the sim but redraw at the SAME trailing cg.time the active path uses below (g_levelTime and
         // g_simResidual are frozen while paused). Passing g_levelTime here instead would jump cg.time FORWARD
         // to the newest snap during the pause, then BACKWARD on unpause -> CG_ProcessSnapshots ERR_DROP

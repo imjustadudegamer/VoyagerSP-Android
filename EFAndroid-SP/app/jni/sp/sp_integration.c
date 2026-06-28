@@ -162,6 +162,33 @@ void SP_EndLoad(void){ g_spLoading = 0; }
 int  SP_IsLoading(void){ return g_spLoading; }
 // SP_DrawLoadingScreen() is defined lower down, after client.h is included (it needs `cls`).
 
+// ---- EF1 SP 1:1 loading screen pump ----
+// During CG_INIT the SP cgame requests a screen refresh at every load stage (cgi_UpdateScreen -> bridge
+// CG_UPDATESCREEN -> here), exactly like retail's trap_UpdateScreen. Drive a real engine screen update so the
+// cgame's CG_DrawInformation (animated LCARS bar + levelshot + quoted level name) is presented. g_spLoadPumping
+// flags SCR_DrawScreenField to draw the live cgame load frame (the cgame is alive inside CG_INIT) instead of the
+// static levelshot fallback. The renderer path is gated open during the load by SCR_UpdateScreen (the SP UI is
+// torn down mid-load, so uivm==NULL/SPUI inactive would otherwise suppress all drawing).
+static int g_spLoadPumping = 0;
+int  SP_LoadPumping(void){ return g_spLoadPumping; }
+void SP_PumpLoadScreen(void){
+    extern void SCR_UpdateScreen(void);
+    if( !g_spLoading ) return;          // only ever paint inside an active load window
+    g_spLoadPumping = 1;
+    SCR_UpdateScreen();
+    g_spLoadPumping = 0;
+}
+
+// ---- EF1 SP save-thumbnail clean capture ----
+// The save-menu thumbnail is captured on the gameplay->menu edge (SP_DrawFrame -> SPR_RequestSaveThumb), but
+// RB_CaptureSaveThumb reads the framebuffer at END of frame, AFTER the engine draws the pause menu over the
+// game -> the saved 'SHOT' chunk showed the menu on top of the game. SP_DrawFrame arms this on the capture
+// frame so SCR_DrawScreenField SKIPS the menu overlay for that ONE frame; the frozen game was already drawn,
+// so the end-of-frame readback is the clean game view. The menu reappears the next frame (imperceptible).
+static int g_spMenuSuppress = 0;
+void SP_ArmMenuSuppress(void){ g_spMenuSuppress = 1; }
+int  SP_TakeMenuSuppress(void){ int v = g_spMenuSuppress; g_spMenuSuppress = 0; return v; }
+
 // ---- spmap console command: load the SP game + spawn a map ----
 extern qboolean SP_LoadGame(const char* solib);
 extern qboolean SP_SpawnServer(const char* mapname);
@@ -419,6 +446,12 @@ void SP_LoadWatchdog(void){
     extern int SP_IsLoading(void);
     extern int SP_LoadPending(void);
     static int stuck = 0;
+    // EF1 SP 1:1 loading screen: the cgame's per-stage redraws (SP_PumpLoadScreen -> SCR_UpdateScreen ->
+    // SCR_DrawScreenField -> here) are legitimate load PROGRESS, not a stall, and a heavy map fires hundreds of
+    // them inside one CG_INIT. Don't count pump frames toward either stuck threshold or the loadStuck>600 abort
+    // would fire mid-load and bounce to the menu. A genuine hang stays inside g_vmMain (no pumps, main loop also
+    // blocked) or returns to the main loop with no pump active — both still advance the counters on real frames.
+    if( SP_LoadPumping() ) return;
     // Stuck LOADING SCREEN: SP_BeginLoad set g_spLoading=1 but a failure path never reached SP_EndLoad
     // (early return / ERR_DROP), so SCR_DrawScreenField draws the levelshot forever. The main stuck-check
     // below excludes SP_IsLoading(), so cover it here: if the load screen has been up far longer than any
