@@ -176,7 +176,16 @@ void ICARUS_FreeEnt( gentity_t *ent )
 
 		entlist_t::iterator it = ICARUS_EntList.find( _strupr(temp) );
 
-		if (it != ICARUS_EntList.end())
+		// SP port fix: only de-register if the map entry still points to THIS entity.
+		// A fast-respawning, same-named NPC (e.g. forge3 cin_reaver*, count -1) overlaps
+		// instances: when a newer instance registers, ICARUS_AssociateEnt overwrites the
+		// name->index entry. An OLDER instance freeing here must NOT blind-erase that entry
+		// or it de-registers the newer, still-ALIVE instance -- making it unresolvable by
+		// I_GetEntityByName()/affect() ("invalid affect() target"). That broke the forge3
+		// death-battle end: restartbattle's affect(cin_reaver1s/2s/5s){SET_TARGET ...} found
+		// nothing, so death_harv3/death_harv4/death_reav7 never armed -> death_counter2 capped
+		// at 2/5 -> cin_rescue never fired -> Harvester horde never stopped.
+		if (it != ICARUS_EntList.end() && it->second == ent->s.number)
 		{
 			ICARUS_EntList.erase(it);
 		}
