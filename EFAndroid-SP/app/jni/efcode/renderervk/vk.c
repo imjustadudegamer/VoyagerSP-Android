@@ -4337,6 +4337,18 @@ void vk_initialize( void )
 				( props.driverVersion >> 12 ) & 0x3FF, props.driverVersion & 0xFFF );
 		}
 	}
+
+	// Low-end ARM Mali (vendor 0x13B5) device-loses under 4x MSAA: the shipped
+	// android_defaults.cfg enables r_ext_multisample 4, and on a small tiler the
+	// MSAA color/resolve attachments plus a heavy map (e.g. voy5) exhaust tiler
+	// memory/bandwidth, faulting the device (VK_ERROR_DEVICE_LOST on the first
+	// frame's rendering_finished_fence). Gate MSAA off for this class only --
+	// maxImageDimension2D <= 2048 is the low-end signal (e.g. Mali-G52 MC2 caps
+	// textures at 2048; capable Mali report >= 4096), so modern Mali keep MSAA.
+	if ( vk.msaaActive && props.vendorID == 0x13B5 && props.limits.maxImageDimension2D <= 2048 ) {
+		vk.msaaActive = qfalse;
+		ri.Printf( PRINT_WARNING, "Disabling MSAA: Mali (%s) device-loses under multisampling\n", props.deviceName );
+	}
 #endif
 
 	if ( /*vk.fboActive &&*/ vk.msaaActive ) {
