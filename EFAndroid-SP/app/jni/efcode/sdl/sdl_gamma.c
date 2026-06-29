@@ -31,6 +31,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 extern SDL_Window *SDL_window;
 
+#ifndef USE_VULKAN
+// Hardware-gamma path, unused under Vulkan (gamma is done in software via the
+// CL_Stub_SetGamma path). Guarded out so it doesn't reference GL-only cvars.
 /*
 =================
 GLimp_SetGamma
@@ -93,4 +96,5 @@ void GLimp_SetGamma( unsigned char red[256], unsigned char green[256], unsigned 
 		ri.Printf( PRINT_DEVELOPER, "SDL_SetWindowGammaRamp() failed: %s\n", SDL_GetError() );
 	}
 }
+#endif // !USE_VULKAN
 

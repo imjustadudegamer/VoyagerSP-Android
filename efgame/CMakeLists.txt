@@ -71,6 +71,7 @@ target_compile_definitions(efgame PRIVATE NDEBUG)
 target_link_options(efgame PRIVATE
   -Wl,--version-script=${AND}/efgame.ver
   -Wl,--unresolved-symbols=ignore-all   # engine syscalls resolved at dlopen; libc/libm linked below
+  -Wl,-z,max-page-size=16384   # 16 KB page-size alignment (Android 15+); NDK r25 defaults to 4 KB
   # NDK r25 adds -Wl,--fatal-warnings by default; on armeabi-v7a the prebuilt
   # libc++abi cxa_guard.o emits a benign ARM/Thumb interworking warning that
   # then fails the link. Override (last-one-wins) so armv7 links cleanly.
@@ -93,5 +94,6 @@ target_compile_definitions(efui PRIVATE NDEBUG _USRDLL UI_EXPORTS)
 target_link_options(efui PRIVATE
   -Wl,--version-script=${AND}/efui.ver
   -Wl,--unresolved-symbols=ignore-all
+  -Wl,-z,max-page-size=16384   # 16 KB page-size alignment (Android 15+)
   -Wl,--no-fatal-warnings)   # see efgame note above (NDK r25 armv7 libc++abi interworking)
 target_link_libraries(efui m)

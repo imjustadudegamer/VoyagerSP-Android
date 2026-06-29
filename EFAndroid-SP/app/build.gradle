@@ -62,6 +62,13 @@ android {
     sourceSets.main {
         jniLibs.srcDir 'libs'
     }
+    // Prefer the 16 KB-aligned arm64 libc++_shared.so shipped in libs/ over the
+    // 4 KB-aligned NDK 25 STL (Android 15+ page-size requirement).
+    packagingOptions {
+        jniLibs {
+            pickFirsts += ['lib/arm64-v8a/libc++_shared.so']
+        }
+    }
     externalNativeBuild {
         cmake {
             path 'jni/CMakeLists.txt'

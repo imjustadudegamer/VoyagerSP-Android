@@ -115,6 +115,10 @@ void GLimp_LogComment( char *comment )
 {
 }
 
+#ifndef USE_VULKAN
+// GL/GLES window/context/mode-setting path, unused in the Vulkan build (window via
+// VKimp_Init, present via vk_present_frame). Guarded out so it doesn't reference
+// GL-only cvars the Vulkan renderer never registers.
 /*
 ===============
 GLimp_CompareModes
@@ -900,6 +904,7 @@ static qboolean GLimp_StartDriverAndSetMode(int mode, qboolean fullscreen, qbool
 
 	return qtrue;
 }
+#endif // !USE_VULKAN
 
 
 #ifdef USE_FLEXIBLE_DISPLAY
@@ -921,6 +926,7 @@ qboolean GLimp_ResizeWindow( int width, int height )
 #endif
 
 
+#ifndef USE_VULKAN	// GL extension probing + GLimp_Init/EndFrame (unused under Vulkan)
 /*
 ===============
 GLimp_InitExtensions
@@ -1269,6 +1275,7 @@ void GLimp_EndFrame( void )
 		r_fullscreen->modified = qfalse;
 	}
 }
+#endif // !USE_VULKAN
 
 #ifdef USE_VULKAN
 /*

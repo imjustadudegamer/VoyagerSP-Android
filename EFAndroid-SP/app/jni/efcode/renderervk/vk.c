@@ -549,6 +549,22 @@ static void vk_create_swapchain( VkPhysicalDevice physical_device, VkDevice devi
 	}
 #endif
 
+	// PowerVR (0x1010) Rogue drivers below 1.386.1368 corrupt scanout when the
+	// swapchain width is not a multiple of 32. Round it down on those drivers only;
+	// the blit/compositor scales the result. No-op on other GPUs.
+	{
+		VkPhysicalDeviceProperties sc_props;
+		qvkGetPhysicalDeviceProperties( physical_device, &sc_props );
+		if ( sc_props.vendorID == 0x1010 && sc_props.driverVersion < 0x00582558 && ( image_extent.width & 31u ) != 0 ) {
+			uint32_t aligned = image_extent.width & ~31u;
+			if ( aligned >= surface_caps.minImageExtent.width && aligned > 0 ) {
+				ri.Printf( PRINT_WARNING, "PowerVR: rounding swapchain width %u -> %u (driver needs a multiple of 32 to avoid scanout corruption)\n",
+					image_extent.width, aligned );
+				image_extent.width = aligned;
+			}
+		}
+	}
+
 	vk.clearAttachment = qtrue;
 
 	if ( !vk.fboActive ) {
@@ -4338,16 +4354,16 @@ void vk_initialize( void )
 		}
 	}
 
-	// Low-end ARM Mali (vendor 0x13B5) device-loses under 4x MSAA: the shipped
-	// android_defaults.cfg enables r_ext_multisample 4, and on a small tiler the
-	// MSAA color/resolve attachments plus a heavy map (e.g. voy5) exhaust tiler
-	// memory/bandwidth, faulting the device (VK_ERROR_DEVICE_LOST on the first
-	// frame's rendering_finished_fence). Gate MSAA off for this class only --
-	// maxImageDimension2D <= 2048 is the low-end signal (e.g. Mali-G52 MC2 caps
-	// textures at 2048; capable Mali report >= 4096), so modern Mali keep MSAA.
-	if ( vk.msaaActive && props.vendorID == 0x13B5 && props.limits.maxImageDimension2D <= 2048 ) {
-		vk.msaaActive = qfalse;
-		ri.Printf( PRINT_WARNING, "Disabling MSAA: Mali (%s) device-loses under multisampling\n", props.deviceName );
+	// Mali (0x13B5) and PowerVR (0x1010) tilers device-lose (VK_ERROR_DEVICE_LOST)
+	// under multisampling, so disable MSAA on these vendors. vkMaxSamples = 1 also
+	// drops the screen-map pass to 1x so no multisampled attachment is created.
+	if ( props.vendorID == 0x13B5 || props.vendorID == 0x1010 ) {
+		if ( vk.msaaActive ) {
+			vk.msaaActive = qfalse;
+			ri.Printf( PRINT_WARNING, "Disabling MSAA: %s (%s) device-loses under multisampling\n",
+				( props.vendorID == 0x13B5 ) ? "Mali" : "PowerVR", props.deviceName );
+		}
+		vkMaxSamples = VK_SAMPLE_COUNT_1_BIT;
 	}
 #endif
 
