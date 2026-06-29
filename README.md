@@ -60,9 +60,9 @@ The manual push target (e.g. over adb) is
 
 ## Known issues
 
-This port is 90% complete, but has yet to be fully play tested. Known issues:
+This port is over 90% complete, but has yet to be fully play tested. Known issues:
 
-- **Save corruption is technically possible** — back up your saves; loads may occasionally fail
+- **Save corruption is technically possible and retail PC elite force saves or not compatible - but might be in the future** — back up your saves; loads may occasionally fail
   or restore an inconsistent state. Most save specific isssues have been resolved, however latent bugs might still present themselves.
 - **Minor graphical and audio glitches** are still present.
 - **Character animations are not 100% accurate** yet.
