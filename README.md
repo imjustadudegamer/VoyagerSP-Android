@@ -25,10 +25,13 @@ No game data is included. You need your own copy of the retail game
   deadzone options.
 - Aspect handling: 4:3 pillarbox or 16:9, applied to the 3D view, HUD, and 2D menus,
   with black side bars.
+- Retail LCARS level-loading screens (animated load bar, levelshot, and your saved
+  screenshot when loading a save) on every load path.
 - Save menu thumbnails (real framebuffer capture) and autosave labelling.
 - In-app game-data import: if the game data is missing at launch, the app lets you pick
   your `pak*.pk3` files and a retail `efgamex86.dll` with the system file picker and
   copies them into place. No storage permission needed at any target SDK.
+- 16 KB memory page-size compatible (Android 15+); all native libraries are 16 KB-aligned.
 
 ## Screenshot from the first mission
 
@@ -63,6 +66,9 @@ This port is 90% complete, but has yet to be fully play tested. Known issues:
   or restore an inconsistent state. Most save specific isssues have been resolved, however latent bugs might still present themselves.
 - **Minor graphical and audio glitches** are still present.
 - **Character animations are not 100% accurate** yet.
+- **Anti-aliasing (MSAA) is disabled on Mali and PowerVR GPUs** as a precaution against a
+  graphics-device-lost crash seen on some of those devices. This is a best-effort
+  workaround and may not cover every affected device — please report any issues.
 - **REPORT YOUR ISSUES PLEASE!**
 
 ## Build
