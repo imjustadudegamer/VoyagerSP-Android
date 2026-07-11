@@ -6,6 +6,14 @@ project(GAME)
 # 16 KB page-size devices (NDK 25 defaults to 4 KB). Applies to SDL2 + libmain.
 add_link_options(-Wl,-z,max-page-size=16384)
 
+# Strip the absolute host build path from __FILE__ / assert strings / debug info so
+# the developer's home directory never leaks into libmain.so (or any log a user sends
+# back). Applies to every target defined below (SDL + engine + bridge). -ffile-prefix-map
+# covers debug info + __FILE__; -fmacro-prefix-map covers __FILE__ inside macros (assert).
+add_compile_options(
+  -ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=/src
+  -fmacro-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=/src)
+
 # armeabi-v7a requires cpufeatures library
 # include(AndroidNdkModules)
 # android_ndk_import_module_cpufeatures()

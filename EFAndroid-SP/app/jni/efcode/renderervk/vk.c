@@ -4329,6 +4329,21 @@ void vk_initialize( void )
 	vkMaxSamples = MIN( props.limits.sampledImageColorSampleCounts, props.limits.sampledImageDepthSampleCounts );
 
 #ifdef __ANDROID__
+	// --- Mali/mobile diagnostic dump. Logs ONLY GPU-reported capabilities (no host
+	// or file paths), so a reporter's log is safe to share. Grep "VKDIAG". Together
+	// with the "Disabling MSAA" / "Clamping render resolution" / "skipping pixel
+	// readback" lines this pins the device, its real maxImageDimension2D (is the
+	// clamp a no-op?), and its MSAA support for any field crash report.
+	ri.Printf( PRINT_ALL, "VKDIAG: GPU '%s' vendor 0x%04X device 0x%04X\n",
+		props.deviceName, props.vendorID, props.deviceID );
+	ri.Printf( PRINT_ALL, "VKDIAG: api %u.%u.%u driverVersion 0x%08X\n",
+		VK_VERSION_MAJOR( props.apiVersion ), VK_VERSION_MINOR( props.apiVersion ),
+		VK_VERSION_PATCH( props.apiVersion ), props.driverVersion );
+	ri.Printf( PRINT_ALL, "VKDIAG: maxImageDimension2D %u (render %dx%d) colorSamples 0x%X depthSamples 0x%X\n",
+		props.limits.maxImageDimension2D, glConfig.vidWidth, glConfig.vidHeight,
+		(unsigned)props.limits.sampledImageColorSampleCounts,
+		(unsigned)props.limits.sampledImageDepthSampleCounts );
+
 	// NOTE: an Adreno 5xx "corrupt MSAA resolves" gate used to live here
 	// (MSAA banding on Adreno 530 + 740, plus DEVICE_LOST on 740). The real
 	// root cause was ours, not the driver's: POST_BLOOM pipeline handles were
@@ -4439,6 +4454,42 @@ void vk_initialize( void )
 
 	if ( glConfig.maxTextureSize > MAX_TEXTURE_SIZE )
 		glConfig.maxTextureSize = MAX_TEXTURE_SIZE; // ResampleTexture() relies on that maximum
+
+#ifdef __ANDROID__
+	// Defensive clamp for genuinely limited GPUs: our FBO render targets
+	// (color/depth/msaa/bloom/capture) are ordinary VkImages created at the render
+	// resolution, so they are bound by maxImageDimension2D (unlike swapchain images,
+	// which are exempt). If a device ever reports a maxImageDimension2D smaller than
+	// the panel, a render target created at panel width is out of spec -- the driver
+	// may create it yet fault later. Scale the render resolution down to fit,
+	// preserving aspect; the swapchain shrinks with it and the compositor upscales.
+	// This is a correctness safety net, NOT the fix for the common Mali/PowerVR
+	// DEVICE_LOST (that is handled by tolerating device loss at the pixel readback):
+	// mainstream Mali reports maxImageDimension2D=8192+, so this is a no-op there and
+	// on Adreno (16384). It only fires on a device whose limit is really below the
+	// panel size. cls.glconfig (2D/HUD/touch scaling) picks this up via
+	// RE_BeginRegistration after R_Init.
+	{
+		const uint32_t maxDim = props.limits.maxImageDimension2D;
+		if ( maxDim > 0 && ( (uint32_t)glConfig.vidWidth > maxDim || (uint32_t)glConfig.vidHeight > maxDim ) ) {
+			const int ow = glConfig.vidWidth, oh = glConfig.vidHeight;
+			const float scale = (float)maxDim / (float)MAX( ow, oh );
+			int nw = (int)( ow * scale ) & ~1;   // keep dimensions even
+			int nh = (int)( oh * scale ) & ~1;
+			if ( nw < 2 ) nw = 2;
+			if ( nh < 2 ) nh = 2;
+			glConfig.vidWidth  = nw;
+			glConfig.vidHeight = nh;
+			gls.windowWidth    = nw;
+			gls.windowHeight   = nh;
+			gls.captureWidth   = nw;
+			gls.captureHeight  = nh;
+			ri.CL_SetScaling( 1.0, nw, nh );
+			ri.Printf( PRINT_WARNING, "Clamping render resolution %dx%d -> %dx%d (GPU maxImageDimension2D=%u)\n",
+				ow, oh, nw, nh, maxDim );
+		}
+	}
+#endif
 
 	// default chunk size, may be doubled on demand
 	vk.image_chunk_size = IMAGE_CHUNK_SIZE;
@@ -8284,7 +8335,28 @@ void vk_read_pixels( byte *buffer, uint32_t width, uint32_t height )
 	uint32_t i, n;
 	qboolean invalidate_ptr;
 
-	VK_CHECK( qvkWaitForFences( vk.device, 1, &vk.cmd->rendering_finished_fence, VK_FALSE, 1e12 ) );
+	// The renderer already tolerates VK_ERROR_DEVICE_LOST at every other GPU-sync
+	// point (vk_begin_frame, vkQueuePresentKHR) rather than aborting: a tiled mobile
+	// GPU -- Mali (0x13B5) / PowerVR (0x1010), especially low-end parts -- can lose
+	// the device mid-frame. This pixel readback (save-thumbnail / screenshot) was the
+	// one remaining FATAL wait on that path, so a device loss surfaced here as a hard
+	// app crash (the save-thumbnail capture that runs on the gameplay->menu edge).
+	// Match the rest of the renderer: on device loss, skip the capture (blank the
+	// target) and return, instead of driving the create/blit/submit/map below -- all
+	// fatal VK_CHECKs -- against a dead device. Device-agnostic; VK_SUCCESS on a
+	// healthy GPU (Adreno etc.) so the normal path is unchanged.
+	{
+		VkResult wait_res = qvkWaitForFences( vk.device, 1, &vk.cmd->rendering_finished_fence, VK_FALSE, 1e12 );
+		if ( wait_res != VK_SUCCESS ) {
+			if ( wait_res == VK_ERROR_DEVICE_LOST ) {
+				ri.Printf( PRINT_WARNING, "Vulkan: %s returned %s in %s -- skipping pixel readback\n",
+					"vkWaitForFences", vk_result_string( wait_res ), __func__ );
+				Com_Memset( buffer, 0, width * height * 3 );
+				return;
+			}
+			ri.Error( ERR_FATAL, "%s: vkWaitForFences returned %s", __func__, vk_result_string( wait_res ) );
+		}
+	}
 
 	if ( vk.fboActive ) {
 		if ( vk.capture.image ) {

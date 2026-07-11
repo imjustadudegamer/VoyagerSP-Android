@@ -43,6 +43,12 @@ set(EF_COPTS
                             # cxa_guard ARM/Thumb-interworking link bug (syscall not STT_FUNC)
   -fcommon                  # MSVC/old-gcc merged tentative defs (e.g. `game_import_t gi;` in
                             # both g_main and gameinfo); modern clang is -fno-common by default
+  # Strip the absolute host build path from __FILE__ / assert strings / debug info so
+  # the developer's home directory never leaks into the shipped .so (or any crash log
+  # a user sends back). -ffile-prefix-map covers debug info + __FILE__; -fmacro-prefix-map
+  # covers __FILE__ used inside macros (assert). Maps this source root to a neutral token.
+  -ffile-prefix-map=${CMAKE_SOURCE_DIR}=/src
+  -fmacro-prefix-map=${CMAKE_SOURCE_DIR}=/src
 )
 
 # ---- shared utility sources (compiled into BOTH modules, like the retail projects) ----

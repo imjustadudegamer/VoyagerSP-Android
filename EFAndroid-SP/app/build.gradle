@@ -9,8 +9,8 @@ android {
         applicationId "com.voyager.efsp"
         minSdkVersion 24
         targetSdkVersion 35   // game data lives in the app's own OBB dir, which needs no storage permission at any targetSdk
-        versionCode 10105
-        versionName "1.1.5"
+        versionCode 10106
+        versionName "1.1.6"
         externalNativeBuild {
             cmake {
                 arguments "-DANDROID_STL=c++_shared", "-DEF_RENDERER=vulkan"
