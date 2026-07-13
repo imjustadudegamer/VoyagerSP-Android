@@ -29,7 +29,15 @@
 
 #define USE_REVERSED_DEPTH
 
-//#define USE_UPLOAD_QUEUE
+// Async batched image-upload queue (Quake3e). ENABLED for the Mali/PowerVR
+// DEVICE_LOST fix: the synchronous #else path submits one command buffer +
+// a full qvkQueueWaitIdle per image, so a map transition's CG_INIT fired
+// hundreds-to-thousands of back-to-back submit/full-device-idle pairs — a
+// classic way to trip a weak tiler's job-timeout watchdog into
+// VK_ERROR_DEVICE_LOST. With the queue on, uploads accumulate in a single
+// staging command buffer and flush a handful of times (on buffer-full or at
+// each frame boundary), collapsing the storm. Adreno-neutral (upstream default).
+#define USE_UPLOAD_QUEUE
 
 #define VK_NUM_BLOOM_PASSES 4
 
@@ -254,6 +262,12 @@ void vk_release_resources( void );
 
 void vk_wait_idle( void );
 void vk_queue_wait_idle( void );
+
+// Mali/PowerVR device-loss recovery: set when any GPU-sync point sees
+// VK_ERROR_DEVICE_LOST; the client frame loop polls it to drive a device
+// recreate + level reload. Cleared once a fresh device is initialized.
+qboolean vk_device_lost( void );
+void vk_clear_device_lost( void );
 
 //
 // Resources allocation.

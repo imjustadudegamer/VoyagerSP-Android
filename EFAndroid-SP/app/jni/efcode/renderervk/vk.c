@@ -299,10 +299,36 @@ static const char *vk_result_string( VkResult code ) {
 }
 #undef CASE_STR
 
+// --- Mali/PowerVR device-loss recovery -------------------------------------
+// A tiled mobile GPU (Mali 0x13B5 / PowerVR 0x1010) can lose the Vulkan device
+// mid-frame or during a heavy map-transition upload. Once lost, EVERY subsequent
+// Vulkan call returns VK_ERROR_DEVICE_LOST, so the old behaviour -- ri.Error(
+// ERR_FATAL) at the first VK_CHECK -- both hard-crashed and, because CL_Shutdown's
+// own teardown re-hit the dead device, tripped Com_Error's recursive-error guard
+// into a terminal Sys_Error (exactly the crash log's "recursive error after ...
+// qvkQueueWaitIdle ... VK_ERROR_DEVICE_LOST"). Instead we treat DEVICE_LOST as
+// NON-fatal everywhere: note it in a flag, skip the operation, and let the client
+// frame loop drive a full device recreate + level reload (CL_RecoverDeviceLost).
+// vk_initialize() clears the flag once a fresh device is up. This is the safety
+// net; USE_UPLOAD_QUEUE (vk.h) is the primary fix that stops the loss occurring.
+static qboolean vk_deviceLost = qfalse;
+qboolean vk_device_lost( void ) { return vk_deviceLost; }
+void vk_clear_device_lost( void ) { vk_deviceLost = qfalse; }
+static void vk_note_device_lost( const char *where ) {
+	if ( !vk_deviceLost ) {
+		vk_deviceLost = qtrue;
+		ri.Printf( PRINT_WARNING, "VKDIAG: VK_ERROR_DEVICE_LOST at %s -- entering device-loss recovery\n", where ? where : "?" );
+	}
+}
+
 #define VK_CHECK( function_call ) { \
 	VkResult res = function_call; \
 	if ( res < 0 ) { \
-		ri.Error( ERR_FATAL, "Vulkan: %s returned %s", #function_call, vk_result_string( res ) ); \
+		if ( res == VK_ERROR_DEVICE_LOST ) { \
+			vk_note_device_lost( #function_call ); \
+		} else { \
+			ri.Error( ERR_FATAL, "Vulkan: %s returned %s", #function_call, vk_result_string( res ) ); \
+		} \
 	} \
 }
 
@@ -1212,7 +1238,8 @@ static qboolean vk_wait_staging_buffer( void )
 	if ( vk.aux_fence_wait ) {
 		VkResult res = qvkWaitForFences( vk.device, 1, &vk.aux_fence, VK_TRUE, 5 * 1000000000ULL );
 		if ( res != VK_SUCCESS ) {
-			ri.Error( ERR_FATAL, "vkWaitForFences() failed with %s at %s", vk_result_string( res ), __func__ );
+			if ( res == VK_ERROR_DEVICE_LOST ) { vk_note_device_lost( __func__ ); }
+			else ri.Error( ERR_FATAL, "vkWaitForFences() failed with %s at %s", vk_result_string( res ), __func__ );
 		}
 		qvkResetFences( vk.device, 1, &vk.aux_fence );
 		VK_CHECK( qvkResetCommandBuffer( vk.staging_command_buffer, 0 ) );
@@ -1278,7 +1305,8 @@ static void vk_flush_staging_buffer( qboolean final )
 		VK_CHECK( qvkQueueSubmit( vk.queue, 1, &submit_info, vk.aux_fence ) );
 		res = qvkWaitForFences( vk.device, 1, &vk.aux_fence, VK_TRUE, 5 * 1000000000ULL );
 		if ( res != VK_SUCCESS ) {
-			ri.Error( ERR_FATAL, "vkWaitForFences() failed with %s at %s", vk_result_string( res ), __func__ );
+			if ( res == VK_ERROR_DEVICE_LOST ) { vk_note_device_lost( __func__ ); }
+			else ri.Error( ERR_FATAL, "vkWaitForFences() failed with %s at %s", vk_result_string( res ), __func__ );
 		}
 		qvkResetFences( vk.device, 1, &vk.aux_fence );
 		VK_CHECK( qvkResetCommandBuffer( vk.staging_command_buffer, 0 ) );
@@ -4811,6 +4839,7 @@ void vk_initialize( void )
 	}
 
 	vk.active = qtrue;
+	vk_clear_device_lost(); // a freshly created device is, by definition, not lost
 }
 
 
@@ -7127,6 +7156,12 @@ void vk_prewarm_pipelines( void )
 		passes[num_passes++] = RENDER_PASS_POST_BLOOM;
 	}
 
+	// If the device was already lost (e.g. during the preceding upload sweep),
+	// don't drive a burst of vkCreateGraphicsPipelines against a dead device --
+	// bail and let CL_RecoverDeviceLost rebuild everything.
+	if ( vk_deviceLost )
+		return;
+
 	count = 0;
 	start_ms = ri.Milliseconds();
 	for ( p = 0; p < num_passes; p++ ) {
@@ -7136,6 +7171,8 @@ void vk_prewarm_pipelines( void )
 				pipeline->handle[ passes[p] ] = create_pipeline( &pipeline->def, passes[p], i );
 				count++;
 			}
+			if ( vk_deviceLost ) // a create just faulted; stop hammering the device
+				return;
 		}
 	}
 	if ( count ) {
@@ -7991,6 +8028,7 @@ void vk_begin_frame( void )
 			if ( res == VK_ERROR_DEVICE_LOST ) {
 				// silently discard previous command buffer
 				ri.Printf( PRINT_WARNING, "Vulkan: %s returned %s", "vkWaitForFences", vk_result_string( res ) );
+				vk_note_device_lost( "vk_begin_frame/vkWaitForFences" );
 			}
 			else {
 				ri.Error( ERR_FATAL, "Vulkan: %s returned %s", "vkWaitForFences", vk_result_string( res ) );
@@ -8015,6 +8053,12 @@ _retry:
 				retry = qtrue;
 				vk_restart_swapchain( __func__, res );
 				goto _retry;
+			} else if ( res == VK_ERROR_DEVICE_LOST ) {
+				// device lost: no image this frame. Note it (recovery runs next
+				// client frame), leave swapchain_image_acquired == qfalse so
+				// vk_end_frame/vk_present_frame skip the present, and fall through
+				// to begin the command buffer so recorded draws stay valid no-ops.
+				vk_note_device_lost( "vkAcquireNextImageKHR" );
 			} else {
 				ri.Error( ERR_FATAL, "vkAcquireNextImageKHR returned %s", vk_result_string( res ) );
 			}
@@ -8023,7 +8067,7 @@ _retry:
 			// never signal — treating this as acquired would hang the queue submit
 			ri.Error( ERR_FATAL, "vkAcquireNextImageKHR returned %s", vk_result_string( res ) );
 		}
-		vk.cmd->swapchain_image_acquired = qtrue;
+		vk.cmd->swapchain_image_acquired = vk_deviceLost ? qfalse : qtrue;
 	}
 
 	begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -8285,8 +8329,9 @@ void vk_present_frame( void )
 			vk_restart_swapchain( __func__, res );
 			return;
 		case VK_ERROR_DEVICE_LOST:
-			// we can ignore that
+			// non-fatal here; note it so the client frame loop drives recovery
 			ri.Printf( PRINT_DEVELOPER, "vkQueuePresentKHR: device lost\n" );
+			vk_note_device_lost( "vkQueuePresentKHR" );
 			break;
 		default:
 			// or we don't
@@ -8351,6 +8396,7 @@ void vk_read_pixels( byte *buffer, uint32_t width, uint32_t height )
 			if ( wait_res == VK_ERROR_DEVICE_LOST ) {
 				ri.Printf( PRINT_WARNING, "Vulkan: %s returned %s in %s -- skipping pixel readback\n",
 					"vkWaitForFences", vk_result_string( wait_res ), __func__ );
+				vk_note_device_lost( "vk_read_pixels/vkWaitForFences" );
 				Com_Memset( buffer, 0, width * height * 3 );
 				return;
 			}

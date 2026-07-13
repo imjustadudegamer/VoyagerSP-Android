@@ -3052,9 +3052,64 @@ CL_Frame
 
 ==================
 */
+// Mali/PowerVR GPU-loss recovery. The renderer (renderervk/vk.c) now treats
+// VK_ERROR_DEVICE_LOST as non-fatal at every GPU-sync point: it sets a flag
+// (vk_device_lost()) and skips, instead of the old ri.Error(ERR_FATAL) that
+// hard-crashed (and, via CL_Shutdown re-hitting the dead device, tripped
+// Com_Error's recursive guard into a terminal Sys_Error). Here we act on that
+// flag: a lost VkDevice can never be used again, so destroy it (keeping the SDL
+// window) and build a fresh one, then reload the level so the SP cgame
+// re-registers all its media into the new device. This is why a plain
+// vid_restart is unsafe in SP (stale cgame handles) but this is not -- we reload.
+extern qboolean vk_device_lost( void );
+extern void     vk_clear_device_lost( void );
+extern int      SP_IsActive( void );
+void CL_InitRenderer( void ); // defined below; forward-declared for the recovery driver
+
+static void CL_RecoverDeviceLost( void ) {
+	static qboolean recovering = qfalse;
+
+	if ( recovering ) {
+		return; // the reload below pumps frames; never recurse
+	}
+	recovering = qtrue;
+
+	Com_Printf( S_COLOR_YELLOW "GPU device lost -- recreating Vulkan device and reloading last save...\n" );
+
+	// Tear down the dead device+instance but keep the window (REF_KEEP_WINDOW ==
+	// qtrue, same code CL_Vid_Restart_f uses). Every wait/submit inside is now
+	// non-fatal on the lost device, so the teardown unwinds cleanly instead of
+	// cascading into a recursive fatal error.
+	if ( re.Shutdown ) {
+		re.Shutdown( qtrue );
+	}
+	cls.rendererStarted = qfalse;
+
+	// Recreate: re.BeginRegistration -> R_Init -> vk_initialize (fresh instance,
+	// device, swapchain, pipelines). vk_initialize() clears the device-lost flag.
+	CL_InitRenderer();
+	cls.rendererStarted = qtrue;
+	vk_clear_device_lost();
+
+	// Reload the level so all SP media is re-registered against the new device.
+	// The map-transition autosave-at-level-entry guarantees a recent saves/auto.sav
+	// exactly in the situation that provokes the loss (a heavy transition).
+	if ( SP_IsActive() ) {
+		Cbuf_AddText( "load auto\n" );
+	}
+
+	recovering = qfalse;
+}
+
 void CL_Frame ( int msec ) {
 
 	if ( !com_cl_running->integer ) {
+		return;
+	}
+
+	// Recover a lost GPU device before doing anything that touches the renderer.
+	if ( vk_device_lost() ) {
+		CL_RecoverDeviceLost();
 		return;
 	}
 
