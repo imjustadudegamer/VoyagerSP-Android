@@ -312,13 +312,143 @@ static const char *vk_result_string( VkResult code ) {
 // vk_initialize() clears the flag once a fresh device is up. This is the safety
 // net; USE_UPLOAD_QUEUE (vk.h) is the primary fix that stops the loss occurring.
 static qboolean vk_deviceLost = qfalse;
+static char vk_lostAt[64] = "";                 // last VK site that reported the loss
+static VkPhysicalDeviceProperties vk_saved_props; // snapshot for the crash report (survives device loss)
+static int vk_world_vbo_size = 0;               // bytes of the current map's static world geometry (VBO)
 qboolean vk_device_lost( void ) { return vk_deviceLost; }
 void vk_clear_device_lost( void ) { vk_deviceLost = qfalse; }
 static void vk_note_device_lost( const char *where ) {
 	if ( !vk_deviceLost ) {
 		vk_deviceLost = qtrue;
+		Q_strncpyz( vk_lostAt, where ? where : "?", sizeof( vk_lostAt ) );
 		ri.Printf( PRINT_WARNING, "VKDIAG: VK_ERROR_DEVICE_LOST at %s -- entering device-loss recovery\n", where ? where : "?" );
 	}
+}
+
+/*
+==================
+vk_device_lost_report
+
+Fills 'out' with a full human-readable GPU/memory diagnostic snapshot for the
+crash log written when CL_RecoverDeviceLost gives up. MUST be called while the
+lost device's bookkeeping is still live (before re.Shutdown tears it down) --
+it reads only CPU-side accounting and physical-device queries, never the dead
+logical device, so it is safe on a lost device. Returns the string length.
+
+The point of the dump is to tell the two candidate G52 root causes apart:
+  * a GPU job-timeout watchdog trip (heavy render/upload work), vs.
+  * the fixed-region geometry/image OOM on pre-G77 Bifrost.
+So it reports the real device limits plus how full every fixed buffer got.
+==================
+*/
+int vk_device_lost_report( char *out, int outSize ) {
+	VkPhysicalDeviceMemoryProperties mem;
+	VkDeviceSize imageUsed = 0, imageCap;
+	uint32_t i;
+	int n = 0;
+
+	if ( !out || outSize < 2 )
+		return 0;
+	out[0] = '\0';
+
+	for ( i = 0; i < vk_world.num_image_chunks; i++ )
+		imageUsed += vk_world.image_chunks[i].used;
+	imageCap = (VkDeviceSize)vk.image_chunk_size * MAX_IMAGE_CHUNKS;
+
+	n += Com_sprintf( out + n, outSize - n,
+		"GPU            : %s\n"
+		"  vendor 0x%04X device 0x%04X  api %u.%u.%u  driver 0x%08X\n"
+		"  maxImageDimension2D %u   colorSamples 0x%X depthSamples 0x%X\n"
+		"  render %dx%d   MSAA %s\n"
+		"device lost at : %s\n",
+		vk_saved_props.deviceName,
+		vk_saved_props.vendorID, vk_saved_props.deviceID,
+		VK_VERSION_MAJOR( vk_saved_props.apiVersion ), VK_VERSION_MINOR( vk_saved_props.apiVersion ),
+		VK_VERSION_PATCH( vk_saved_props.apiVersion ), vk_saved_props.driverVersion,
+		vk_saved_props.limits.maxImageDimension2D,
+		(unsigned)vk_saved_props.limits.sampledImageColorSampleCounts,
+		(unsigned)vk_saved_props.limits.sampledImageDepthSampleCounts,
+		glConfig.vidWidth, glConfig.vidHeight,
+		vk.msaaActive ? "on" : "off",
+		vk_lostAt[0] ? vk_lostAt : "(none recorded)" );
+
+	// The fixed-size buffers: how close to full each got is the OOM evidence.
+	n += Com_sprintf( out + n, outSize - n,
+		"image chunks   : %u / %u  used %u MB (cap %u MB, chunk %u MB)\n"
+		"world VBO      : %d KB (static map geometry)\n"
+		"dyn geometry   : %u KB per-frame tess buffer\n"
+		"staging buffer : %u KB\n"
+		"pipelines      : %u\n",
+		vk_world.num_image_chunks, (uint32_t)MAX_IMAGE_CHUNKS,
+		(uint32_t)( imageUsed / (1024*1024) ), (uint32_t)( imageCap / (1024*1024) ),
+		(uint32_t)( vk.image_chunk_size / (1024*1024) ),
+		vk_world_vbo_size / 1024,
+		(uint32_t)( vk.defaults.geometry_size / 1024 ),
+		(uint32_t)( vk.staging_buffer.size / 1024 ),
+		vk.pipelines_count );
+
+#ifdef USE_UPLOAD_QUEUE
+	// Upload-throttle evidence: cap (0 = off/fast path), how many submissions the map's
+	// upload storm was broken into, and the largest single one. Small max atom + many
+	// flushes + a loss still happening => uploads are NOT the cause and the render atom is.
+	n += Com_sprintf( out + n, outSize - n,
+		"upload queue   : cap %u KB, %u flushes, max atom %u KB\n",
+		(uint32_t)( vk.upload_flush_size / 1024 ),
+		vk.upload_flush_count,
+		(uint32_t)( vk.upload_atom_max / 1024 ) );
+#endif
+
+	// Texture-registration upload summary + how much the low-end clamp saved.
+	n += vk_registration_report( out + n, outSize - n );
+
+	// Physical-device memory heaps (valid even on a lost logical device).
+	qvkGetPhysicalDeviceMemoryProperties( vk.physical_device, &mem );
+	n += Com_sprintf( out + n, outSize - n, "memory heaps   :" );
+	for ( i = 0; i < mem.memoryHeapCount && n < outSize - 32; i++ ) {
+		n += Com_sprintf( out + n, outSize - n, " [%u]%uMB%s",
+			i, (uint32_t)( mem.memoryHeaps[i].size / (1024*1024) ),
+			( mem.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT ) ? "(local)" : "" );
+	}
+	n += Com_sprintf( out + n, outSize - n, "\n" );
+
+	return n;
+}
+
+/*
+==================
+vk_reset_registration_stats / vk_registration_report
+
+Per-map texture-upload accounting. Reset at the start of each registration
+(RE_BeginRegistration) and reported at the end (RE_EndRegistration) and in the
+device-loss crash log. Measures how much the low-end Mali clamp (vk.extraPicmip /
+vk.maxTextureClamp) actually saves on a given map -- the numbers that tell us
+whether extraPicmip 1 is enough for stasis1 or needs to go to 2.
+==================
+*/
+void vk_reset_registration_stats( void ) {
+	vk.reg_img_count = 0;
+	vk.reg_img_reduced = 0;
+	vk.reg_img_bytes = 0;
+	vk.reg_img_bytes_full = 0;
+	vk.reg_img_biggest = 0;
+	vk.reg_img_biggest_name[0] = '\0';
+}
+
+int vk_registration_report( char *out, int outSize ) {
+	uint32_t saved = ( vk.reg_img_bytes_full > vk.reg_img_bytes )
+		? ( vk.reg_img_bytes_full - vk.reg_img_bytes ) : 0;
+	if ( !out || outSize < 2 )
+		return 0;
+	return Com_sprintf( out, outSize,
+		"registration   : %u images, %u MB uploaded (clamp %d/%d) -- %u of them reduced, "
+		"saved %u MB vs unclamped, biggest %u KB (%s)\n",
+		vk.reg_img_count,
+		(uint32_t)( vk.reg_img_bytes / (1024*1024) ),
+		vk.extraPicmip, vk.maxTextureClamp,
+		vk.reg_img_reduced,
+		(uint32_t)( saved / (1024*1024) ),
+		(uint32_t)( vk.reg_img_biggest / 1024 ),
+		vk.reg_img_biggest_name[0] ? vk.reg_img_biggest_name : "(none)" );
 }
 
 #define VK_CHECK( function_call ) { \
@@ -1264,6 +1394,13 @@ static void vk_flush_staging_buffer( qboolean final )
 	}
 
 	//ri.Printf( PRINT_WARNING, S_COLOR_CYAN ">>> flush %i bytes (final=%i)<<<\n", (int)vk_world.staging_buffer_offset, final );
+
+	// Diag for the device-loss crash log: largest single upload submission and how
+	// many we made this map load. If a loss still happens with a small max atom and
+	// many flushes, uploads are not the culprit and the render atom is (see report).
+	if ( (uint32_t)vk.staging_buffer.offset > vk.upload_atom_max )
+		vk.upload_atom_max = (uint32_t)vk.staging_buffer.offset;
+	vk.upload_flush_count++;
 
 	vk.staging_buffer.offset = 0;
 
@@ -2823,6 +2960,15 @@ qboolean vk_alloc_vbo( const byte *vbo_data, int vbo_size )
 	VkBufferCopy copyRegion[1];
 	VkDeviceSize uploadDone;
 
+	vk_world_vbo_size = vbo_size; // remember for the device-loss crash report
+
+#ifdef USE_UPLOAD_QUEUE
+	// New map's static geometry is going in now -- reset the per-load upload diag so
+	// the crash log characterizes this transition's upload storm, not a prior map's.
+	vk.upload_atom_max = 0;
+	vk.upload_flush_count = 0;
+#endif
+
 	vk_release_vbo();
 
 	desc.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -4327,6 +4473,7 @@ void vk_initialize( void )
 	qvkGetDeviceQueue( vk.device, vk.queue_family_index, 0, &vk.queue );
 
 	qvkGetPhysicalDeviceProperties( vk.physical_device, &props );
+	vk_saved_props = props; // keep a copy for the device-loss crash report
 
 	vk.cmd = vk.tess + 0;
 	vk.uniform_alignment = props.limits.minUniformBufferOffsetAlignment;
@@ -4407,6 +4554,32 @@ void vk_initialize( void )
 				( props.vendorID == 0x13B5 ) ? "Mali" : "PowerVR", props.deviceName );
 		}
 		vkMaxSamples = VK_SAMPLE_COUNT_1_BIT;
+#ifdef USE_UPLOAD_QUEUE
+		// Mali/PowerVR expose a single hardware queue shared by transfer and graphics.
+		// A heavy map transition streams the whole level's textures through the staging
+		// buffer back-to-back; on a weak part (Mali-G52 MC2) that unbroken upload burst
+		// keeps the GPU busy long enough to trip the kernel job-timeout watchdog, which
+		// resets the GPU -> VK_ERROR_DEVICE_LOST (surfaced at the next render fence wait,
+		// see voyager-gpucrash.txt). Cap each upload submission and force it to complete
+		// before the next, so the GPU digests the storm in small serialized bites instead
+		// of one long job. This is a loading-time cost only (a few extra fence waits during
+		// registration); it does not touch steady-state rendering or resolution, and fast
+		// GPUs keep upload_flush_size == 0 (no change).
+		vk.upload_flush_size = TILER_UPLOAD_FLUSH_SIZE;
+		ri.Printf( PRINT_ALL, "VKDIAG: %s single-queue tiler -- capping upload submissions at %u KB\n",
+			( props.vendorID == 0x13B5 ) ? "Mali" : "PowerVR", (uint32_t)( vk.upload_flush_size / 1024 ) );
+#endif
+		// The real device loss on these parts (Mali-G52 MC2, stasis1 "Data Retrieval") is
+		// not OOM and not one big texture -- it is the *cumulative* texture-registration
+		// upload of a full mission (~148 MB, hundreds of transfers). Bounding submission
+		// size alone did not stop it. Halve bulk (picmip) textures to cut total upload
+		// bytes ~4x, and cap any single oversized base texture. UI/HUD/fonts lack
+		// IMGFLAG_PICMIP so stay full-res. Applied in generate_image_upload_data; the
+		// vk.reg_img_* counters report the saving. Bump extraPicmip to 2 if 1 is not enough.
+		vk.extraPicmip = 1;
+		vk.maxTextureClamp = 512;
+		ri.Printf( PRINT_ALL, "VKDIAG: %s low-end tiler -- extraPicmip %d, maxTextureClamp %d (cut mission-load upload storm)\n",
+			( props.vendorID == 0x13B5 ) ? "Mali" : "PowerVR", vk.extraPicmip, vk.maxTextureClamp );
 	}
 #endif
 
@@ -5447,6 +5620,14 @@ void vk_upload_image_data( image_t *image, int x, int y, int width, int height, 
 #ifdef USE_UPLOAD_QUEUE
 	if ( vk_wait_staging_buffer() ) {
 		// wait for vkQueueSubmit() completion before new upload
+	}
+
+	// Single-queue tiler watchdog mitigation (see vk_initialize): once the pending
+	// batch reaches the cap, flush+wait so the GPU processes the upload storm in small
+	// serialized bites rather than one long transfer job that can trip the kernel
+	// job-timeout. Checked before the fit test so this batch's copy starts fresh.
+	if ( vk.upload_flush_size && vk.staging_buffer.offset >= vk.upload_flush_size ) {
+		vk_flush_staging_buffer( qfalse );
 	}
 
 	if ( vk.staging_buffer.size - vk.staging_buffer.offset < buffer_size ) {

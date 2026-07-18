@@ -584,12 +584,28 @@ typedef struct {
 	int base_level_height;
 } Image_Upload_Data;
 
+// Bytes a base WxH image occupies once uploaded: the full mip chain (RGBA) when
+// mipmapped, otherwise just the base level. Used to measure the low-end Mali
+// texture clamp's saving (see vk.reg_img_* / vk_registration_report).
+static uint32_t R_MipChainBytes( int w, int h, qboolean mipmap ) {
+	uint32_t total = 0;
+	for ( ;; ) {
+		total += (uint32_t)w * (uint32_t)h * 4;
+		if ( !mipmap || ( w == 1 && h == 1 ) )
+			break;
+		w = ( w > 1 ) ? ( w >> 1 ) : 1;
+		h = ( h > 1 ) ? ( h >> 1 ) : 1;
+	}
+	return total;
+}
+
 static void generate_image_upload_data( image_t *image, byte *data, Image_Upload_Data *upload_data ) {
-	
+
 	qboolean mipmap = (image->flags & IMGFLAG_MIPMAP) ? qtrue : qfalse;
 	qboolean picmip = (image->flags & IMGFLAG_PICMIP) ? qtrue : qfalse;
 	byte* resampled_buffer = NULL;
 	int scaled_width, scaled_height;
+	int full_width, full_height; // base dims WITHOUT the low-end Mali clamp (for the saving measurement)
 	int width = image->width;
 	int height = image->height;
 	unsigned* scaled_buffer;
@@ -630,6 +646,21 @@ static void generate_image_upload_data( image_t *image, byte *data, Image_Upload
 		scaled_height >>= 1;
 	}
 
+	// Base dims before the low-end Mali clamp -- kept to measure how much the clamp saves.
+	full_width = scaled_width;
+	full_height = scaled_height;
+
+	// Low-end single-queue tiler (Mali/PowerVR) mission-load mitigation: cap the base
+	// size of bulk (picmip) textures so no single upload is oversized. UI/HUD/font
+	// textures lack IMGFLAG_PICMIP and stay full-res. See vk.maxTextureClamp (vk.h).
+	if ( picmip && vk.maxTextureClamp > 0 ) {
+		while ( scaled_width > vk.maxTextureClamp
+			|| scaled_height > vk.maxTextureClamp ) {
+			scaled_width >>= 1;
+			scaled_height >>= 1;
+		}
+	}
+
 	upload_data->buffer = (byte*) ri.Hunk_AllocateTempMemory( 2 * 4 * scaled_width * scaled_height );
 	if ( data == NULL ) {
 		Com_Memset( upload_data->buffer, 0, 2 * 4 * scaled_width * scaled_height );
@@ -660,10 +691,16 @@ static void generate_image_upload_data( image_t *image, byte *data, Image_Upload
 	// perform optional picmip operation
 	//
 	if ( picmip && ( tr.mapLoading || r_nomip->integer == 0 ) ) {
-		scaled_width >>= r_picmip->integer;
-		scaled_height >>= r_picmip->integer;
+		// vk.extraPicmip: extra halving of bulk textures on low-end Mali/PowerVR to cut
+		// the cumulative mission-load upload storm (0 on capable GPUs -- unchanged).
+		scaled_width >>= r_picmip->integer + vk.extraPicmip;
+		scaled_height >>= r_picmip->integer + vk.extraPicmip;
 		//x >>= r_picmip->integer;
 		//y >>= r_picmip->integer;
+
+		// unclamped reference gets only the standard picmip, so full - actual == our saving
+		full_width >>= r_picmip->integer;
+		full_height >>= r_picmip->integer;
 	}
 
 	//
@@ -674,6 +711,27 @@ static void generate_image_upload_data( image_t *image, byte *data, Image_Upload
 	}
 	if (scaled_height < 1) {
 		scaled_height = 1;
+	}
+	if (full_width < 1) {
+		full_width = 1;
+	}
+	if (full_height < 1) {
+		full_height = 1;
+	}
+
+	// Per-registration upload accounting (measures the low-end Mali clamp's saving).
+	{
+		uint32_t actual_bytes = R_MipChainBytes( scaled_width, scaled_height, mipmap );
+		uint32_t full_bytes   = R_MipChainBytes( full_width, full_height, mipmap );
+		vk.reg_img_count++;
+		vk.reg_img_bytes += actual_bytes;
+		vk.reg_img_bytes_full += full_bytes;
+		if ( actual_bytes < full_bytes )
+			vk.reg_img_reduced++;
+		if ( actual_bytes > vk.reg_img_biggest ) {
+			vk.reg_img_biggest = actual_bytes;
+			Q_strncpyz( vk.reg_img_biggest_name, image->imgName, sizeof( vk.reg_img_biggest_name ) );
+		}
 	}
 
 	upload_data->base_level_width = scaled_width;

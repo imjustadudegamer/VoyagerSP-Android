@@ -946,6 +946,10 @@ void RE_BeginRegistration( glconfig_t *glconfigOut ) {
 
 	RE_ClearScene();
 
+	// Start this map's texture-upload accounting clean (R_Init's default images above
+	// are not part of the map's media). Reported in RE_EndRegistration / the crash log.
+	vk_reset_registration_stats();
+
 	tr.registered = qtrue;
 }
 

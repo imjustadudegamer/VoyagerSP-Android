@@ -2187,6 +2187,14 @@ static void RE_EndRegistration( void ) {
 	// vkCreateGraphicsPipelines hitch remains. vkCreateGraphicsPipelines
 	// needs no command buffer, so this is safe here.
 	vk_prewarm_pipelines();
+
+	// All map media registered without a device loss -- log the upload/clamp summary
+	// so we can see how much the low-end Mali texture clamp saved on this map.
+	{
+		char summary[256];
+		vk_registration_report( summary, sizeof( summary ) );
+		ri.Printf( PRINT_ALL, "VKDIAG: %s", summary );
+	}
 #else
 	R_IssuePendingRenderCommands();
 	if ( !ri.Sys_LowPhysicalMemory() ) {

@@ -22,6 +22,13 @@
 #define STAGING_BUFFER_SIZE    (2 * 1024 * 1024)  /* by default */
 #define STAGING_BUFFER_SIZE_HI (24 * 1024 * 1024) /* enough for max.texture size upload with all mip levels at once */
 
+/* Single-queue tiler upload-throttle cap (Mali/PowerVR): force a staging flush+wait
+   once an accumulated upload batch reaches this size, so no one transfer submission
+   monopolizes the shared hardware queue long enough to trip the GPU job-timeout
+   watchdog during a heavy map transition. A single oversized image still uploads in
+   one submission (its copy cannot be split), so this only bounds *batched* uploads. */
+#define TILER_UPLOAD_FLUSH_SIZE (2 * 1024 * 1024)
+
 #define IMAGE_CHUNK_SIZE (32 * 1024 * 1024)
 #define MAX_IMAGE_CHUNKS 56
 
@@ -268,6 +275,9 @@ void vk_queue_wait_idle( void );
 // recreate + level reload. Cleared once a fresh device is initialized.
 qboolean vk_device_lost( void );
 void vk_clear_device_lost( void );
+int vk_device_lost_report( char *out, int outSize ); // fill a GPU/memory diagnostic snapshot (call before device teardown)
+void vk_reset_registration_stats( void );            // zero the per-map upload accounting (RE_BeginRegistration)
+int  vk_registration_report( char *out, int outSize ); // format the per-map upload/clamp summary line
 
 //
 // Resources allocation.
@@ -649,7 +659,35 @@ typedef struct {
 #ifdef USE_UPLOAD_QUEUE
 	VkFence aux_fence;
 	qboolean aux_fence_wait;
+	// Single-queue tiler (Mali/PowerVR) watchdog mitigation: when non-zero, force a
+	// staging flush+wait once an upload batch reaches this many bytes, so the shared
+	// hardware queue is never monopolized by one long transfer burst during a heavy
+	// map transition (the VK_ERROR_DEVICE_LOST seen on Mali-G52). 0 = no cap (fast
+	// path, unchanged). upload_atom_max / upload_flush_count are diag counters, reset
+	// per map load, reported in the device-loss crash log.
+	uint32_t upload_flush_size;
+	uint32_t upload_atom_max;
+	uint32_t upload_flush_count;
 #endif
+
+	// Low-end single-queue tiler (Mali/PowerVR) mission-load upload-storm mitigation
+	// (see stasis1 "Data Retrieval" device loss): the crash is not OOM and not one big
+	// texture -- it is the cumulative texture-registration upload of a full mission.
+	// extraPicmip halves bulk (IMGFLAG_PICMIP) textures to cut total upload bytes;
+	// maxTextureClamp caps any single oversized base texture. Both 0 = off (unchanged)
+	// on capable GPUs. Game data is untouched -- only smaller mip levels are uploaded.
+	int extraPicmip;
+	int maxTextureClamp;
+
+	// Per-registration image-upload accounting (reset in RE_BeginRegistration, reported
+	// in RE_EndRegistration and appended to the device-loss crash log). Measures exactly
+	// how much the clamp above saves on a given map.
+	uint32_t reg_img_count;      // images uploaded this registration
+	uint32_t reg_img_reduced;    // how many were shrunk by extraPicmip/maxTextureClamp
+	uint32_t reg_img_bytes;      // actual mip-chain bytes uploaded
+	uint32_t reg_img_bytes_full; // bytes had we NOT clamped (the saving = full - bytes)
+	uint32_t reg_img_biggest;    // largest single image's uploaded bytes
+	char     reg_img_biggest_name[64];
 
 	struct staging_buffer_s {
 		VkBuffer handle;

@@ -3063,23 +3063,101 @@ CL_Frame
 // vid_restart is unsafe in SP (stale cgame handles) but this is not -- we reload.
 extern qboolean vk_device_lost( void );
 extern void     vk_clear_device_lost( void );
+extern int      vk_device_lost_report( char *out, int outSize ); // GPU/memory diag snapshot
 extern int      SP_IsActive( void );
 void CL_InitRenderer( void ); // defined below; forward-declared for the recovery driver
 
+// A device that loses on the heavy transition load will lose again the moment we
+// reload that same map -- reloading forever is exactly the "stuck constantly
+// reloading" hang seen on weak Bifrost parts (Mali-G52) where USE_UPLOAD_QUEUE
+// cut the storm enough to dodge the fatal crash but not enough to survive the
+// load. So we bound the retries: CL_DEVICE_LOST_MAX_STREAK consecutive recoveries
+// with no healthy run of frames in between means this GPU can't render this
+// content -- give up and drop to the main menu instead of hanging. The streak is
+// cleared in CL_Frame once CL_DEVICE_LOST_HEALTHY_FRAMES real frames render
+// cleanly, so an isolated one-off loss never counts toward the give-up limit.
+#define CL_DEVICE_LOST_MAX_STREAK     3
+#define CL_DEVICE_LOST_HEALTHY_FRAMES 90
+static int cl_deviceLostStreak = 0;
+static int cl_deviceLostHealthy = 0;
+
+// Called from CL_Frame after a frame renders with a live device: count clean
+// frames and, once we've strung enough together, consider the device recovered.
+void CL_NoteHealthyFrame( void ) {
+	if ( cl_deviceLostStreak > 0 && ++cl_deviceLostHealthy >= CL_DEVICE_LOST_HEALTHY_FRAMES ) {
+		cl_deviceLostStreak = 0;
+		cl_deviceLostHealthy = 0;
+	}
+}
+
+// Build the give-up crash log (client context + renderer GPU/memory snapshot) and
+// write it to the game's home dir (the OBB dir on Android, next to qconsole.log and
+// saves) via the engine filesystem. MUST run BEFORE re.Shutdown, while the lost
+// device's bookkeeping is still live. msg receives the on-screen "returning to
+// menu" text with the saved location.
+static void CL_BuildDeviceLostCrashLog( char *msg, int msgSize ) {
+	static char report[4096];
+	const char *fileName = "voyager-gpucrash.txt";
+	int    n;
+
+	n = Com_sprintf( report, sizeof( report ),
+		"VoyagerSP -- GPU device-loss crash log\n"
+		"======================================\n"
+		"map            : %s\n"
+		"gave up after  : %d consecutive device losses (no recovery)\n\n",
+		( cl.mapname[0] ? cl.mapname : "(none)" ),
+		CL_DEVICE_LOST_MAX_STREAK );
+
+	// Renderer appends GPU name, limits, and how full every fixed buffer got --
+	// this is what tells a watchdog timeout apart from a fixed-region OOM.
+	n += vk_device_lost_report( report + n, sizeof( report ) - n );
+
+	n += Com_sprintf( report + n, sizeof( report ) - n,
+		"\nPlease send this file to the developer so the GPU can be supported.\n" );
+
+	// Mirror the whole report to the console/logcat too (adb logcat, tag VoyagerSP).
+	Com_Printf( "%s", report );
+
+	// Write next to qconsole.log/saves in the game home (OBB) dir via the engine FS.
+	FS_WriteFile( fileName, report, n );
+
+	Com_sprintf( msg, msgSize,
+		"The GPU was lost repeatedly on this level, so the game returned to the "
+		"main menu instead of freezing.\n\n"
+		"A crash log was saved to:\n%s/%s/%s",
+		Cvar_VariableString( "fs_homepath" ), FS_GetCurrentGameDir(), fileName );
+}
+
 static void CL_RecoverDeviceLost( void ) {
 	static qboolean recovering = qfalse;
+	char giveUpMsg[MAX_OSPATH + 256];
+	qboolean giveUp;
 
 	if ( recovering ) {
 		return; // the reload below pumps frames; never recurse
 	}
 	recovering = qtrue;
 
-	Com_Printf( S_COLOR_YELLOW "GPU device lost -- recreating Vulkan device and reloading last save...\n" );
+	// A recovery that hasn't yet earned a healthy run counts toward the streak.
+	cl_deviceLostStreak++;
+	cl_deviceLostHealthy = 0;
+	giveUp = ( cl_deviceLostStreak >= CL_DEVICE_LOST_MAX_STREAK );
+
+	Com_Printf( S_COLOR_YELLOW "GPU device lost -- recreating Vulkan device (attempt %d/%d)...\n",
+		cl_deviceLostStreak, CL_DEVICE_LOST_MAX_STREAK );
+
+	// If this is the give-up attempt, gather + save the crash log NOW, before
+	// re.Shutdown wipes the lost device's accounting we want to report on.
+	giveUpMsg[0] = '\0';
+	if ( giveUp ) {
+		CL_BuildDeviceLostCrashLog( giveUpMsg, sizeof( giveUpMsg ) );
+	}
 
 	// Tear down the dead device+instance but keep the window (REF_KEEP_WINDOW ==
 	// qtrue, same code CL_Vid_Restart_f uses). Every wait/submit inside is now
 	// non-fatal on the lost device, so the teardown unwinds cleanly instead of
-	// cascading into a recursive fatal error.
+	// cascading into a recursive fatal error. We rebuild the device unconditionally
+	// (even when giving up) so the main menu below has a live device to draw on.
 	if ( re.Shutdown ) {
 		re.Shutdown( qtrue );
 	}
@@ -3090,6 +3168,17 @@ static void CL_RecoverDeviceLost( void ) {
 	CL_InitRenderer();
 	cls.rendererStarted = qtrue;
 	vk_clear_device_lost();
+
+	// Too many losses with no healthy run in between: reloading the map would just
+	// lose the device again. Bail to the main menu (device rebuilt above so it can
+	// draw) with the saved-log message rather than hang forever.
+	if ( giveUp ) {
+		cl_deviceLostStreak = 0;
+		cl_deviceLostHealthy = 0;
+		recovering = qfalse;
+		Com_Error( ERR_DROP, "%s", giveUpMsg );
+		return; // not reached: ERR_DROP long-jumps back to the main loop
+	}
 
 	// Reload the level so all SP media is re-registered against the new device.
 	// The map-transition autosave-at-level-entry guarantees a recent saves/auto.sav
@@ -3248,6 +3337,10 @@ void CL_Frame ( int msec ) {
 	SCR_RunCinematic();
 
 	Con_RunConsole();
+
+	// A frame just rendered against a live device; count it toward "recovered" so
+	// an isolated device loss doesn't accumulate toward the give-up limit.
+	CL_NoteHealthyFrame();
 
 	cls.framecount++;
 }
