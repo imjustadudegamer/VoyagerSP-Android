@@ -9,6 +9,9 @@ the Vulkan renderer from [Quake3e](https://github.com/ec-/Quake3e); the single-p
 game logic (Raven's officially-released Elite Force SP source) runs as a native module.
 Touch controls, full gamepad support.
 
+**Its sequel has an Android port too:** *Star Trek: Voyager — Elite Force II* is
+playable on Android via [Provenance EF2](https://github.com/imjustadudegamer/Provenance-Elite-Force-II-decomp-Android-linux).
+
 No game data is included. You need your own copy of the retail game
 (GOG release, original CD + patches, or an existing PC install).
 
