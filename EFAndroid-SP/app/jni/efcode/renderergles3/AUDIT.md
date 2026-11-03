@@ -1,11 +1,16 @@
 # GLES 3.2 renderer — audit and port plan
 
-Status: **GL layer ported, backend not implemented.** The module builds for
-Linux and Android and is loadable, but it reports itself not ready
-(`renderer_backend_ready() == 0`), so it is never offered in the video menu and
-`GetRefAPI` returns NULL — the client then falls back to the Vulkan module
-cleanly (see "Load/fallback contract" below). Nothing in this directory is
-reachable from the Vulkan renderer.
+Status: **implementation in progress, Android only.** The module now compiles
+the *same* EF1 front end as the Vulkan module (`renderervk/tr_*.c`, unmodified)
+and supplies the drawing backend (`gl3_backend.c`) plus the ported EF2 GL layer.
+It still reports `renderer_backend_ready() == 0`: nothing has ever been
+executed, so the menu must not offer it and `GetRefAPI` returns NULL, which makes
+the client fall back to Vulkan (see "Load/fallback contract" below). Linux does
+not build this module at all — the desktop stays Vulkan-only.
+
+Milestone state (see the end of this file for the detailed list): M1 (context /
+frame loop / present) and the M2/M3 drawing path are written; bloom, MSAA,
+r_smp, flares and full readback remain.
 
 This document is the delta that has to be understood before writing backend
 code. It was written before the port, deliberately.
@@ -72,7 +77,37 @@ the entity surface types), not EF2's tr_*. EF2's tr_* are bound to
 tiki/skeletor/hwtex/ghost/swipe and bring the entire EF2 data model with them —
 explicitly out of scope.
 
-## 4. What was ported in this change
+## 4. Implementation architecture (what replaced the plan below)
+
+The plan of forking `renderervk/tr_*.c` was dropped: the module compiles those
+files **unchanged** and implements their backend interface (`vk_*`,
+`Vk_Pipeline_Def`, the `vk` state struct) in GLES 3.2 terms. That keeps one copy
+of the EF1 front-end logic for both renderers. The only edits to files shared
+with the Vulkan build are guarded by `USE_GLES3_BACKEND` and compile to the
+original code otherwise:
+
+* `renderervk/tr_init.c` — create the window/context through the module's own
+  `GL3_PlatformInit` instead of the client's Vulkan `ri.VKimp_*`, skip the
+  client-side window teardown, and refuse `GetRefAPI` while
+  `renderer_backend_ready()` is 0.
+* `renderervk/tr_local.h` — under `USE_GLES3_BACKEND`, include the real GLES
+  headers and keep only the renderer-private tokens of the `glCompat`
+  substitution enum (the standard GL names come from the GL header).
+* `renderercommon/tr_common.h` — under `USE_GLES3_BACKEND`, include the GLES
+  qgl table instead of SDL's desktop GL header.
+
+`gl3_backend.c` implements: the pipeline-def registry (same `vk.pipelines[]`),
+lazy GL program cache per `(shader_type, fog_stage)` with the same permutation
+defines and specialization values the Vulkan backend bakes, state-bits →
+blend/depth/cull/polygon-offset/stencil mapping, viewport/scissor rectangles,
+reversed-depth conventions (clear 0, `GL_GEQUAL`), the std140 uniform block fed
+by the front end's `VK_PushUniform`, per-draw attribute streaming and index
+upload, GL textures (images and lightmaps, including sub-uploads and cinematic
+frames), offscreen colour+depth targets for the main and screenMap/mirror
+passes, the gamma composite on present, `glReadPixels` capture, and no-op/stub
+implementations for the parts listed under "missing".
+
+## 4b. The GL layer ported in the earlier step
 
 * `qgl_gles3.{c,h}`, `qgl_gles3_procs.h`, `qgl_gles3_tokens.h` — EF2's GLES 3.2
   entry-point loader (name → `void (*)(void)` table, `glGetString` sanity, EGL/
@@ -102,7 +137,23 @@ explicitly out of scope.
   cannot link the engine's qcommon — same shims renderervk/tr_init.c has for
   the Vulkan module).
 
-## 5. What is missing (the remaining work, in dependency order)
+## 5. Milestone status (Android)
+
+| Milestone | State |
+|---|---|
+| M1 context / frame loop / present / shutdown | written: SDL ES 3.2 context, offscreen main target, glClear, gamma composite + swap, `r_mode`/`r_fullscreen` re-sync on vid_restart, clean shutdown. Unverified — nothing has been run. |
+| M2 2D/UI | written: the same program/state/attribute path the world uses; 2D transform with the GL Y flip, blending, scissor, fonts and console go through it. Unverified. |
+| M3 world | written: pipeline-def → program/state, streaming attributes + indices, std140 UBO from `VK_PushUniform`, lightmaps and sub-uploads, shader stages (`tcGen`/`rgbGen`/`tcMod` are front-end, so they arrive as the same defs), alpha test, env mapping, fog (fog-collapse and fog-only), `RT_*` surfaces (front-end), MD3/MDR/IQM (front-end), screenMap/mirror target. Unverified. |
+| M4 post-process | partial: offscreen colour+depth and the gamma composite exist; bloom/extract/blur/blend shaders are converted and validated but the chain is not wired; MSAA resolve not implemented (`r_ext_multisample` is ignored); screenshots work through `glReadPixels` on the main target; the save-thumbnail readback goes through `vk_read_pixels`; cinematic/Bink frames upload through `vk_upload_image_data(update=qtrue)`. |
+| M5 the rest | not done: `r_smp` (the backend is single-threaded; the engine's render thread would need a shared context, and the module forces the classic path), flares (Vulkan's storage-buffer depth test has no GLES equivalent here; stubbed), device/context-loss recovery, `VkPipelineCache` equivalence. |
+
+Known gaps that a first launch will hit if the module is selected:
+bloom is ignored with a warning; MSAA is ignored; `r_smp` must stay 0;
+flares do nothing; the `glReadPixels` capture path assumes the render target
+matches `gls.captureWidth/Height` (true with the shipped `r_renderScale 0`,
+`r_ext_supersample 0`).
+
+## 5b. What is missing (the original plan, kept for the remaining work)
 
 1. **Backend layer** (`gl3_backend.c`): implement the drawing interface the
    tr_* files call, in GL terms —

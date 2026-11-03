@@ -14,9 +14,9 @@ precision highp float;
 precision highp int;
 
 layout(binding = 0) uniform sampler2D texture0;
-layout(binding = 0) uniform sampler2D texture1;
-layout(binding = 0) uniform sampler2D texture2;
-layout(binding = 0) uniform sampler2D texture3;
+layout(binding = 1) uniform sampler2D texture1;
+layout(binding = 2) uniform sampler2D texture2;
+layout(binding = 3) uniform sampler2D texture3;
 
 layout(location = 0) in vec2 tex_coord;
 
@@ -28,7 +28,7 @@ layout(location = 0) out vec4 out_color;
 //uniform float threshold; // was constant_id=3 default 0.6
 uniform float factor; // was constant_id=4 default 0.5
 
-//const vec3 sRGB = { 0.2126, 0.7152, 0.0722 };
+//const vec3 sRGB = vec3( 0.2126, 0.7152, 0.0722 );
 
 void main()
 {

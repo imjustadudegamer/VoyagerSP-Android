@@ -32,6 +32,6 @@ const vec2 t[4] = vec2[4](
 
 
 void main() {
-	gl_Position = vec4( v[ gl_VertexIndex ], 0.0f, 1.0f );
-	frag_tex_coord = t[ gl_VertexIndex ];
+	gl_Position = vec4( v[ gl_VertexID ], 0.0f, 1.0f );
+	frag_tex_coord = t[ gl_VertexID ];
 }

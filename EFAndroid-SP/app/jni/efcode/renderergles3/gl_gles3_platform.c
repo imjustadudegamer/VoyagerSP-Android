@@ -37,6 +37,8 @@ extern refimport_t ri;
 static SDL_Window    *gl3_window = NULL;
 static SDL_GLContext  gl3_context = NULL;
 static qboolean       gl3_subsystemInited = qfalse;
+static int            gl3_drawableWidth = 0;	// last measured drawable, for GL3_PlatformDrawableSize
+static int            gl3_drawableHeight = 0;
 
 static void GL3_LogToEngine( const char *line )
 {
@@ -191,6 +193,10 @@ qboolean GL3_PlatformInit( glconfig_t *config )
 	SDL_GL_GetDrawableSize( gl3_window, &dw, &dh );
 	if ( dw <= 0 || dh <= 0 )
 		SDL_GetWindowSize( gl3_window, &dw, &dh );
+	if ( dw > 0 && dh > 0 ) {
+		gl3_drawableWidth = dw;
+		gl3_drawableHeight = dh;
+	}
 
 	Com_Memset( config, 0, sizeof( *config ) );
 	config->vidWidth = dw;
@@ -233,6 +239,67 @@ qboolean GL3_PlatformInit( glconfig_t *config )
 	ri.IN_Init( gl3_window );
 
 	return qtrue;
+}
+
+// Recompute the desired window size from the same cvars the first init used and
+// apply it to the live window. This is the r_mode / r_fullscreen / vid_restart
+// path: the engine keeps the window (REF_KEEP_WINDOW) and expects the renderer
+// to resize.
+void GL3_PlatformResync( glconfig_t *config )
+{
+	int width = 0, height = 0;
+	qboolean fullscreen = qfalse;
+	int dw = 0, dh = 0;
+
+	if ( !gl3_window )
+		return;
+
+#ifdef __ANDROID__
+	{
+		SDL_DisplayMode dm;
+		if ( SDL_GetDesktopDisplayMode( 0, &dm ) == 0 ) {
+			width = dm.w;
+			height = dm.h;
+		}
+		fullscreen = qtrue;
+	}
+#else
+	GL3_ModeFromCvars( &width, &height, &fullscreen );
+#endif
+
+	if ( width > 0 && height > 0 ) {
+		SDL_SetWindowFullscreen( gl3_window, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0 );
+		SDL_SetWindowSize( gl3_window, width, height );
+	}
+
+	SDL_GL_GetDrawableSize( gl3_window, &dw, &dh );
+	if ( dw <= 0 || dh <= 0 )
+		SDL_GetWindowSize( gl3_window, &dw, &dh );
+	if ( dw > 0 && dh > 0 ) {
+		gl3_drawableWidth = dw;
+		gl3_drawableHeight = dh;
+	}
+
+	if ( dw > 0 && dh > 0 ) {
+		config->vidWidth = dw;
+		config->vidHeight = dh;
+		config->windowAspect = (float)dw / (float)dh;
+		config->isFullscreen = fullscreen;
+	}
+}
+
+void GL3_PlatformDrawableSize( int *width, int *height )
+{
+	int dw = 0, dh = 0;
+
+	if ( gl3_window )
+		SDL_GL_GetDrawableSize( gl3_window, &dw, &dh );
+	if ( dw <= 0 || dh <= 0 ) {
+		dw = gl3_drawableWidth;
+		dh = gl3_drawableHeight;
+	}
+	if ( width ) *width = dw;
+	if ( height ) *height = dh;
 }
 
 void GL3_PlatformSwapBuffers( void )

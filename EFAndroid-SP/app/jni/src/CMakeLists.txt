@@ -347,45 +347,62 @@ if(NOT EF_STATIC_RENDERER)
 endif()
 
 # ---------------------------------------------------------------------------
-# renderer_gles3 -- the second renderer module (GLES 3.2)
+# renderer_gles3 -- the GLES 3.2 renderer module (Android only)
 #
-# Status: GL layer + GLSL are ported (AUDIT.md in that directory); the drawing
-# backend is not written yet, so the module reports renderer_backend_ready()=0.
-# It is still a real module target on both platforms so the layer stays
-# compiled, linked and loadable while the backend work lands. The client never
-# offers it (cl_rendererModules lists ready modules only) and loading it
-# manually makes the client fall back to Vulkan.
+# Android is the only target: Linux keeps the Vulkan renderer only, so the
+# desktop Release/ and the AppImage stay single-renderer.
 #
-# Sources today: the EF2 GL entry-point loader, this engine's SDL/EGL-free GLES
-# context layer and the module entry point. It carries its own q_shared.c so it
-# has no link-time engine symbol, exactly like the Vulkan module.
+# The module compiles the SAME renderervk front end as the Vulkan module
+# (BSP/MD3/MDR/IQM loading, shaders, tessellation, EF entity types) plus
+# renderergles3/gl3_backend.c, which implements the front end's backend
+# interface (`vk_*`, Vk_Pipeline_Def) in GLES 3.2 terms, and the ported EF2 GL
+# layer (qgl_gles3 loader + SDL/EGL context). No tr_*.c is forked: the only
+# renderervk changes are two `#ifdef USE_GLES3_BACKEND` seams in tr_init.c
+# (window creation and shutdown), which compile to the Vulkan code otherwise.
+#
+# The module refuses to initialise (GetRefAPI -> NULL) until
+# renderer_backend_ready() returns 1, so a missing/broken GLES backend falls
+# back to Vulkan through the client's reset-then-fatal path.
 # ---------------------------------------------------------------------------
-set(RENDERER_GLES3_SRC
-  ${EF}/renderergles3/qgl_gles3.c
-  ${EF}/renderergles3/gl_gles3_platform.c
-  ${EF}/renderergles3/gl3_renderer.c
-  ${EF}/qcommon/q_shared.c)
+if(EF_PLATFORM STREQUAL "android")
 
-if(NOT EF_STATIC_RENDERER)
+  # The EF1 front end, unchanged -- minus the Vulkan backend implementation
+  # files (this module provides the backend itself).
+  set(RENDERER_GLES3_SHARED ${RENDERER_VK_SRC})
+  list(REMOVE_ITEM RENDERER_GLES3_SHARED
+    ${EF}/renderervk/vk.c
+    ${EF}/renderervk/vk_vbo.c
+    ${EF}/renderervk/vk_flares.c)
+
+  set(RENDERER_GLES3_SRC
+    ${RENDERER_GLES3_SHARED}
+    ${RENDERCOMMON_SRC}
+    ${RENDERER_LIB_SRC}
+    ${EF}/qcommon/puff.c
+    ${JPEG_SRC}
+    ${EF}/renderergles3/qgl_gles3.c
+    ${EF}/renderergles3/gl_gles3_platform.c
+    ${EF}/renderergles3/gl3_backend.c)
+
   add_library(renderer_gles3 SHARED ${RENDERER_GLES3_SRC})
 
-  if(EF_PLATFORM STREQUAL "android")
-    target_include_directories(renderer_gles3 PRIVATE
-      ${EF} ${CMAKE_CURRENT_SOURCE_DIR}/../SDL/include)
-  else()
-    target_include_directories(renderer_gles3 PRIVATE
-      ${EF} ${SDL2_INCLUDE_DIRS})
-  endif()
+  set_target_properties(renderer_gles3 PROPERTIES PREFIX "lib")
 
-  # USE_VULKAN is required even though this backend has no Vulkan code: the
+  target_include_directories(renderer_gles3 PRIVATE
+    ${EF} ${EF}/zlib ${EF}/jpeg-8c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../SDL/include)
+
+  # USE_VULKAN is required even though the backend has no Vulkan calls: the
   # engine compiles refexport_t/refimport_t (renderercommon/tr_public.h) with
   # USE_VULKAN, which selects the Quake3e Cvar_CheckRange signature and the
   # VKimp_* window slots. A module built without it would have a different
-  # struct layout than the client that fills it.
+  # struct layout than the client that fills it. USE_GLES3_BACKEND selects the
+  # module's own window/context seam inside the shared tr_init.c.
   target_compile_definitions(renderer_gles3 PRIVATE
     ELITEFORCE
     USE_VULKAN
     USE_RENDERER_DLOPEN
+    USE_GLES3_BACKEND
     USE_FLEXIBLE_DISPLAY=1
     USE_LOCAL_HEADERS=1
     PRODUCT_VERSION="1.40"
@@ -396,15 +413,6 @@ if(NOT EF_STATIC_RENDERER)
     -Werror=implicit-function-declaration
     -O2 -fomit-frame-pointer)
 
-  if(EF_PLATFORM STREQUAL "android")
-    # librenderer_gles3.so, packaged by AGP from this target.
-    set_target_properties(renderer_gles3 PROPERTIES PREFIX "lib")
-    target_link_libraries(renderer_gles3 PRIVATE SDL2 m)
-  else()
-    # Release/renderer_gles3.so beside voyagersp.
-    set_target_properties(renderer_gles3 PROPERTIES
-      PREFIX ""
-      LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Release)
-    target_link_libraries(renderer_gles3 PRIVATE SDL2::SDL2 dl m pthread)
-  endif()
+  target_link_libraries(renderer_gles3 PRIVATE SDL2 m)
+
 endif()

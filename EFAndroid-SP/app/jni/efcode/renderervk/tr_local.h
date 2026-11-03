@@ -127,7 +127,38 @@ extern refimport_t ri;
 
 #ifdef USE_VULKAN
 #include "vk.h"
-// GL constants substitutions
+#ifdef USE_GLES3_BACKEND
+// The GLES module includes the real GL headers, so the standard GL_* names
+// (GL_NEAREST, GL_LINEAR, GL_MODULATE, GL_DECAL, GL_BACK_LEFT, ...) already
+// exist with their real values. Only the renderer-private blend/env tokens the
+// shader front end uses need names here.
+#include "../renderergles3/qgl.h"
+typedef enum {
+	// Desktop-only texture-environment tokens (not in GLES headers); the
+	// front end only uses them as opaque stage selectors, the backend maps the
+	// resulting shader types instead.
+	GL_MODULATE,
+	GL_ADD,
+	GL_ADD_NONIDENTITY,
+
+	GL_BLEND_MODULATE,
+	GL_BLEND_ADD,
+	GL_BLEND_ALPHA,
+	GL_BLEND_ONE_MINUS_ALPHA,
+	GL_BLEND_MIX_ALPHA, // SRC_ALPHA + ONE_MINUS_SRC_ALPHA
+	GL_BLEND_MIX_ONE_MINUS_ALPHA, // ONE_MINUS_SRC_ALPHA + SRC_ALPHA
+
+	GL_BLEND_DST_COLOR_SRC_ALPHA, // GLS_SRCBLEND_DST_COLOR + GLS_DSTBLEND_SRC_ALPHA
+
+	// Not present in GLES headers (desktop stereo draw-buffer tokens); the
+	// stereo path is inert on GL ES but the selector still compiles.
+	GL_BACK_LEFT,
+	GL_BACK_RIGHT
+} glCompat;
+
+#define GL_INDEX_TYPE		uint32_t
+#else
+// GL constants substitutions (the Vulkan build has no GL headers)
 typedef enum {
 	GL_NEAREST,
 	GL_LINEAR,
@@ -157,6 +188,7 @@ typedef enum {
 #define GLint				int
 #define GLuint				unsigned int
 #define GLboolean			VkBool32
+#endif // USE_GLES3_BACKEND
 #else
 #define GL_INDEX_TYPE		GL_UNSIGNED_INT
 #endif

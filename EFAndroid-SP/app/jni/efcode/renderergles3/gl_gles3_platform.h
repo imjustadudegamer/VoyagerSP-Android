@@ -19,6 +19,13 @@ client's Vulkan window hooks (ri.VKimp_*).
 // (the module must then not pretend to render).
 qboolean GL3_PlatformInit( glconfig_t *config );
 
+// Re-apply r_mode / r_fullscreen to an existing window (vid_restart with
+// REF_KEEP_WINDOW). No-op when there is no window. Refreshes config sizes.
+void GL3_PlatformResync( glconfig_t *config );
+
+// Current drawable size (for the present pass viewport).
+void GL3_PlatformDrawableSize( int *width, int *height );
+
 // Present the default framebuffer.
 void GL3_PlatformSwapBuffers( void );
 

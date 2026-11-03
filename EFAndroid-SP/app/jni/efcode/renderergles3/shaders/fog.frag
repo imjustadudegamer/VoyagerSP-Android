@@ -28,7 +28,7 @@ layout(std140, binding = 0) uniform UBO {
 //#endif
 };
 
-layout(binding = 0) uniform sampler2D fog_texture;
+layout(binding = 3) uniform sampler2D fog_texture;
 
 //layout(location = 0) in vec4 frag_color;
 //layout(location = 1) in vec2 frag_tex_coord0;

@@ -57,8 +57,22 @@ def convert(name, text):
                'uniform mat4 mvp;', t)
     t = re.sub(r'layout\(set\s*=\s*\d+\s*,\s*binding\s*=\s*(\d+)\)\s*uniform\s+UBO',
                r'layout(std140, binding = \1) uniform UBO', t)
-    t = re.sub(r'layout\(set\s*=\s*\d+\s*,\s*binding\s*=\s*(\d+)\)\s*uniform\s+(sampler\w+)',
-               r'layout(binding = \1) uniform \2', t)
+    # Texture units: in Vulkan every sampler lives in its own descriptor set at
+    # binding 0, so the set number carried no information; in GL all samplers
+    # must have distinct units. The unit is the sampler's role: texture0..2 ->
+    # units 0..2, fog_texture -> unit 3.
+    def sampler_unit(m):
+        name = m.group(3)
+        if name.startswith("texture") and name[7:].isdigit():
+            unit = int(name[7:])
+        elif name == "fog_texture":
+            unit = 3
+        else:
+            unit = 0
+        return "layout(binding = %d) uniform sampler2D %s" % (unit, name)
+
+    t = re.sub(r'layout\(set\s*=\s*\d+\s*,\s*binding\s*=\s*(\d+)\)\s*uniform\s+(sampler\w+)\s+(\w+)',
+               sampler_unit, t)
     t = re.sub(r'out gl_PerVertex\s*\{[^}]*\};', '', t)
     t = re.sub(r'layout\s*\(depth_less\)\s*out\s+float\s+gl_FragDepth;',
                '// gl_FragDepth is a built-in output in GLSL ES 3.20', t)
@@ -73,6 +87,32 @@ def convert(name, text):
     # they are uniforms, so this local cannot be `const` in ES.
     t = t.replace("const vec4 frag_color = vec4(identity_color",
                   "vec4 frag_color = vec4(identity_color")
+
+    # GLSL ES 3.20 has no C-style `{ }` initializers: they must be constructor
+    # calls. Covers the constant colour/luma vectors in the post-process
+    # shaders.
+    t = re.sub(r'const (vec[234])\s+(\w+)\s*=\s*\{([^}]*)\};',
+               lambda m: "const %s %s = %s(%s);" % (m.group(1), m.group(2), m.group(1), m.group(3)),
+               t)
+    # ... and the ordered-dither matrix, which becomes an array constructor.
+    def float_array(m):
+        body = m.group(3)
+        # ES has no implicit int -> float conversion, and the matrix literals are
+        # written as integers.
+        body = re.sub(r'(?<![\w.])(\d+)(?![\d.])', r'\1.0', body)
+        return "const float %s[%s] = float[%s](%s);" % (m.group(1), m.group(2), m.group(2), body)
+
+    t = re.sub(r'const float (\w+)\[(\w+(?:\s*\*\s*\w+)?)\]\s*=\s*\{([^}]*)\};',
+               float_array, t)
+    # a `const` local cannot be initialised from a non-constant expression in ES
+    t = t.replace("const float v = dot(", "float v = dot(")
+    # no implicit ivec3 -> vec3 arithmetic in ES; the constructor converts
+    t = t.replace("ivec3 depth = ivec3(", "vec3 depth = vec3(")
+    # greyscale was a specialization float; ES will not compare float to int
+    t = t.replace("greyscale == 1 )", "greyscale == 1.0 )")
+    t = t.replace("greyscale != 0 )", "greyscale != 0.0 )")
+    # Vulkan's gl_VertexIndex is gl_VertexID in GL.
+    t = t.replace("gl_VertexIndex", "gl_VertexID")
     return t.rstrip() + "\n"
 
 

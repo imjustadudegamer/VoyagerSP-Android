@@ -27,7 +27,7 @@ uniform float threshold; // was constant_id=3 default 0.6
 uniform int extract_mode; // was constant_id=5 default 0
 uniform int base_modulate; // was constant_id=6 default 0
 
-//const vec3 sRGB = { 0.2126, 0.7152, 0.0722 };
+//const vec3 sRGB = vec3( 0.2126, 0.7152, 0.0722 );
 
 void main() {
 	vec3 base = texture(texture0, frag_tex_coord).rgb;
@@ -44,7 +44,7 @@ void main() {
 				}
 				else
 				{
-					const vec3 luma = { 0.2126, 0.7152, 0.0722 };
+					const vec3 luma = vec3( 0.2126, 0.7152, 0.0722 );
 					base *= dot( luma, base.rgb );
 				}
 			}
@@ -57,8 +57,8 @@ void main() {
 	}
 	else if ( extract_mode == 2 ) // luma(r,g,b) >= threshold
 	{
-		const vec3 luma = { 0.2126, 0.7152, 0.0722 };
-		const float v = dot( luma, base.rgb );
+		const vec3 luma = vec3( 0.2126, 0.7152, 0.0722 );
+		float v = dot( luma, base.rgb );
 		if ( v >= threshold )
 		{
 			if ( base_modulate != 0 )
@@ -91,7 +91,7 @@ void main() {
 				}
 				else
 				{
-					const vec3 luma = { 0.2126, 0.7152, 0.0722 };
+					const vec3 luma = vec3( 0.2126, 0.7152, 0.0722 );
 					base *= dot( luma, base.rgb );
 				}
 			}

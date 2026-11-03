@@ -46,13 +46,13 @@ layout(std140, binding = 0) uniform UBO {
 
 layout(binding = 0) uniform sampler2D texture0;
 #ifdef USE_TX1
-layout(binding = 0) uniform sampler2D texture1;
+layout(binding = 1) uniform sampler2D texture1;
 #endif
 #ifdef USE_TX2
-layout(binding = 0) uniform sampler2D texture2;
+layout(binding = 2) uniform sampler2D texture2;
 #endif
 #ifdef USE_FOG
-layout(binding = 0) uniform sampler2D fog_texture;
+layout(binding = 3) uniform sampler2D fog_texture;
 #endif
 
 #if defined (USE_CLX_IDENT)

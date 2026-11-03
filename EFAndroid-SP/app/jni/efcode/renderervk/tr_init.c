@@ -22,6 +22,12 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // tr_init.c -- functions that are not called every frame
 
 #include "tr_local.h"
+#ifdef USE_GLES3_BACKEND
+#include "../renderergles3/gl_gles3_platform.h"
+// Exported by the GLES backend; 0 until the backend is verified to draw. While
+// it is 0 the module refuses to initialize, so the client falls back to Vulkan.
+Q_EXPORT int renderer_backend_ready( void );
+#endif
 
 glconfig_t	glConfig;
 
@@ -255,12 +261,15 @@ static void R_ClearSymTables( void )
 #ifdef USE_RENDERER_DLOPEN
 // The client's module probe lists a backend in cl_rendererModules only when the
 // module reports its drawing backend as complete (see CL_RendererModuleReady).
-// The Vulkan backend is complete; the GLES module answers 0 while its backend
-// is unfinished, so the UI never offers it.
+// The Vulkan backend is complete; the GLES module defines its own answer in
+// gl3_backend.c (0 until that backend is verified), so the UI never offers a
+// half-built backend.
+#ifndef USE_GLES3_BACKEND
 Q_EXPORT int renderer_backend_ready( void )
 {
 	return 1;
 }
+#endif
 
 // q_shared.h declares Com_Error( int level, ... ), and the engine's own
 // implementation takes the int form; this shim was never compiled until the
@@ -2166,9 +2175,15 @@ static void RE_Shutdown( refShutdownCode_t code ) {
 		Com_Memset( &glState, 0, sizeof( glState ) );
 
 		if ( code != REF_KEEP_WINDOW ) {
+#ifndef USE_GLES3_BACKEND
+			// Vulkan: the client owns the window and tears it down here.
 			if ( ri.VKimp_Shutdown ) {
 				ri.VKimp_Shutdown( code == REF_UNLOAD_DLL ? qtrue : qfalse );
 			}
+#else
+			// GLES: vk_shutdown() already released the module's own window and
+			// context (GL3_PlatformShutdown); there is no client-side window.
+#endif
 			Com_Memset( &glConfig, 0, sizeof( glConfig ) );
 		}
 #else
@@ -2244,6 +2259,15 @@ refexport_t *GetRefAPI ( int apiVersion, refimport_t *rimp ) {
 	ri = *rimp;
 
 	Com_Memset( &re, 0, sizeof( re ) );
+
+#ifdef USE_GLES3_BACKEND
+	if ( !renderer_backend_ready() ) {
+		ri.Printf( PRINT_WARNING,
+			"renderer_gles3: the GLES 3.2 backend is built but not marked ready; refusing to\n"
+			"start so the client falls back to the Vulkan renderer (see renderergles3/AUDIT.md).\n" );
+		return NULL;
+	}
+#endif
 
 	if ( apiVersion != REF_API_VERSION ) {
 		ri.Printf(PRINT_ALL, "Mismatched REF_API_VERSION: expected %i, got %i\n",

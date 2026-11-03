@@ -24,7 +24,14 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "../qcommon/q_shared.h"
 #include "../renderercommon/tr_public.h"
-#include "qgl.h"
+#if defined( USE_GLES3_BACKEND )
+// The GLES renderer module compiles this same tr_* front end but needs the
+// GLES 3.2 type set and the EF2 GL entry-point table, not SDL's desktop GL
+// header. Everything else in this header is identical for both renderers.
+#	include "../renderergles3/qgl.h"
+#else
+#	include "qgl.h"
+#endif
 
 typedef enum
 {
