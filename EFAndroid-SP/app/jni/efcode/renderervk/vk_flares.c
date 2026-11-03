@@ -486,6 +486,20 @@ void RB_RenderFlares( void ) {
 		return;
 	}
 
+	// Flare visibility is tested by drawing a point through vk.dot_pipeline,
+	// which writes a storage-buffer flag through a fragment shader (there is no
+	// depth readback in Vulkan; see RB_TestFlare). Both the pipeline and the
+	// storage-buffer layout only exist when the device advertises
+	// fragmentStoresAndAtomics -- R_ClearFlares() already uses exactly this test,
+	// and vk.dot_pipeline is only created under it (vk.c, "flare visibility test
+	// dot"). Without this guard RB_TestFlare() would bind the default pipeline
+	// and then bind vk.storage.descriptor against vk.pipeline_layout_storage,
+	// a descriptor set that is not compatible with that pipeline's layout: an
+	// invalid-usage path on a device where flares can never be visible anyway.
+	if ( !vk.fragmentStores ) {
+		return;
+	}
+
 	if ( vk.renderPassIndex == RENDER_PASS_SCREENMAP ) {
 		return;
 	}

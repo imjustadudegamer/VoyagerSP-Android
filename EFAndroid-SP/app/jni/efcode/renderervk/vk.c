@@ -315,8 +315,12 @@ static qboolean vk_deviceLost = qfalse;
 static char vk_lostAt[64] = "";                 // last VK site that reported the loss
 static VkPhysicalDeviceProperties vk_saved_props; // snapshot for the crash report (survives device loss)
 static int vk_world_vbo_size = 0;               // bytes of the current map's static world geometry (VBO)
-qboolean vk_device_lost( void ) { return vk_deviceLost; }
-void vk_clear_device_lost( void ) { vk_deviceLost = qfalse; }
+// Q_EXPORT: these three are part of the renderer *module's* public surface, not
+// of refexport_t. The client dlopen()s them alongside GetRefAPI to drive
+// device-loss recovery; Q_EXPORT keeps them visible under -fvisibility=hidden
+// (a static build simply links them directly).
+Q_EXPORT qboolean vk_device_lost( void ) { return vk_deviceLost; }
+Q_EXPORT void vk_clear_device_lost( void ) { vk_deviceLost = qfalse; }
 static void vk_note_device_lost( const char *where ) {
 	if ( !vk_deviceLost ) {
 		vk_deviceLost = qtrue;
@@ -341,7 +345,7 @@ The point of the dump is to tell the two candidate G52 root causes apart:
 So it reports the real device limits plus how full every fixed buffer got.
 ==================
 */
-int vk_device_lost_report( char *out, int outSize ) {
+Q_EXPORT int vk_device_lost_report( char *out, int outSize ) {
 	VkPhysicalDeviceMemoryProperties mem;
 	VkDeviceSize imageUsed = 0, imageCap;
 	uint32_t i;
@@ -6065,7 +6069,10 @@ void vk_create_post_process_pipeline( int program_index, uint32_t width, uint32_
 	create_info.pViewportState = &viewport_state;
 	create_info.pRasterizationState = &rasterization_state;
 	create_info.pMultisampleState = &multisample_state;
-	create_info.pDepthStencilState = (program_index == 2) ? &depth_stencil_state : NULL;
+	// The post-process passes are colour-only, so the depth/stencil state is
+	// ignored by the driver; pass it unconditionally (upstream had a dead
+	// "(program_index == 2) ? ... : NULL" line here that the next line
+	// overwrote -- removed).
 	create_info.pDepthStencilState = &depth_stencil_state;
 	create_info.pColorBlendState = &blend_state;
 	create_info.pDynamicState = NULL;
