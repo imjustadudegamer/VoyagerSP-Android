@@ -2,6 +2,7 @@ package com.voyager.ef;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.Dialog;
 import android.app.ProgressDialog;
 import android.content.ContentResolver;
 import android.content.DialogInterface;
@@ -10,7 +11,18 @@ import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
 import android.provider.OpenableColumns;
+import android.graphics.Color;
+import android.graphics.drawable.ColorDrawable;
 import android.util.Log;
+
+// The resource class is generated in the app's namespace (org.libsdl.app).
+import org.libsdl.app.R;
+import android.view.View;
+import android.view.Window;
+import android.widget.Button;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
+import android.widget.TextView;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -50,8 +62,15 @@ public class ImportActivity extends Activity {
     /** Config the engine execs before it resolves the renderer module. */
     private static final String CONFIG_NAME = "efspconfig.cfg";
     private static final String RENDERER_CVAR = "cl_renderer";
+    /** The renderer modules this APK ships; the value is what CL_InitRef formats in. */
+    private static final String RENDERER_VULKAN = "vulkan";
+    private static final String RENDERER_GLES3 = "gles3";
 
     private File mBaseEFDir;
+    /** The first-run panel (game data + renderer), kept so it can be re-shown. */
+    private Dialog mImportDialog;
+    /** Renderer the panel currently shows; null until read from the config. */
+    private String mRendererChoice;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -66,11 +85,7 @@ public class ImportActivity extends Activity {
         mBaseEFDir = new File(obbRoot, "baseEF");
         mBaseEFDir.mkdirs();
 
-        if (allRequiredPresent()) {
-            askRendererThenLaunch();
-        } else {
-            showImportDialog(null);
-        }
+        firstRunOrLaunch();
     }
 
     private boolean allRequiredPresent() {
@@ -127,46 +142,57 @@ public class ImportActivity extends Activity {
     }
 
     /**
-     * First-run renderer choice.
+     * First-run gate.
      *
-     * The renderer is a module the engine loads once at startup, so this is the
-     * only moment the choice can take effect immediately: it is made here, before
-     * EFActivity starts the engine, and written to the config the engine reads
-     * before it resolves the module. Afterwards the setting lives where it always
-     * did - Settings -> Video -> Renderer - and needs a restart to change.
-     *
-     * Asked once: if the config already names a renderer, the game starts.
+     * The engine loads its renderer module once at startup, so the only moment a
+     * choice can take effect immediately is before the game starts. That is this
+     * screen: game data plus the renderer rows, shown until a renderer has been
+     * recorded. Once both are settled the game starts directly.
      */
-    private void askRendererThenLaunch() {
-        if (rendererAlreadyChosen()) {
+    private void firstRunOrLaunch() {
+        if (allRequiredPresent() && rendererAlreadyChosen()) {
             launchGame();
             return;
         }
+        showImportDialog(null);
+    }
 
-        AlertDialog.Builder b = new AlertDialog.Builder(this);
-        b.setTitle("Renderer");
-        b.setMessage("This build has two renderers. Vulkan is the default and the one"
-                + " the game has been tuned for; OpenGL ES 3.2 is an alternative for"
-                + " devices where Vulkan misbehaves.\n\n"
-                + "The choice applies to this launch. You can change it later in"
-                + " Settings -> Video -> Renderer (it takes effect the next time the"
-                + " game starts).");
-        b.setCancelable(false);
-        b.setPositiveButton("Vulkan (default)", new DialogInterface.OnClickListener() {
-            @Override
-            public void onClick(DialogInterface dialog, int which) {
-                writeRendererChoice("vulkan");
-                launchGame();
+    /** The renderer the archive selects, or null when it names none yet. */
+    private String readRendererChoice() {
+        BufferedReader r = null;
+        try {
+            r = new BufferedReader(new InputStreamReader(
+                    new FileInputStream(new File(mBaseEFDir, CONFIG_NAME)), "UTF-8"));
+            String line;
+            while ((line = r.readLine()) != null) {
+                String t = line.trim();
+                if (t.startsWith("//") || t.startsWith("#")) {
+                    continue;
+                }
+                if (t.startsWith("seta ") || t.startsWith("set ") || t.startsWith("seta\t")) {
+                    String rest = t.substring(t.indexOf(' ') + 1).trim();
+                    if (rest.startsWith(RENDERER_CVAR)) {
+                        String v = rest.substring(RENDERER_CVAR.length()).trim();
+                        if (v.startsWith("\"")) {
+                            int q = v.indexOf('"', 1);
+                            v = q > 1 ? v.substring(1, q) : v;
+                        }
+                        return v;
+                    }
+                }
             }
-        });
-        b.setNegativeButton("OpenGL ES 3.2", new DialogInterface.OnClickListener() {
-            @Override
-            public void onClick(DialogInterface dialog, int which) {
-                writeRendererChoice("gles3");
-                launchGame();
-            }
-        });
-        b.show();
+        } catch (Exception ignored) {
+            // no config yet: first run
+        } finally {
+            if (r != null) try { r.close(); } catch (Exception ignored) {}
+        }
+        return null;
+    }
+
+    /** Record a renderer row as soon as the user picks it, not at launch. */
+    private void chooseRenderer(String value) {
+        mRendererChoice = value;
+        writeRendererChoice(value);
     }
 
     /** True when the archived config already carries a renderer choice. */
@@ -244,37 +270,79 @@ public class ImportActivity extends Activity {
         finish();
     }
 
-    /** First-run / missing-data dialog. extraLine, if non-null, is prepended. */
+    /**
+     * First-run panel: the game-data instructions and the renderer rows, as one
+     * screen. The renderer sits above the buttons so it is a visible choice before
+     * any file is picked; the primary button imports when data is missing and
+     * starts the game once it is present.
+     */
     private void showImportDialog(String extraLine) {
-        String msg = (extraLine != null ? extraLine + "\n\n" : "")
-                + "Star Trek: Voyager - Elite Force needs the game data from "
-                + "your retail copy of the game:\n\n"
-                + "    pak0.pk3\n    pak1.pk3\n    pak2.pk3\n    pak3.pk3\n"
-                + "    efgamex86.dll\n\n"
-                + "(The paks are in the BaseEF folder of an installed copy; "
-                + "pak0.pk3 is about 540 MB. efgamex86.dll is in the game's "
-                + "main install folder and confirms you own the game.)\n\n"
-                + "Copy them onto this device, then tap \"Select game files\" "
-                + "and pick all of them.\n\n"
-                + "Still missing: " + missingList();
+        if (mImportDialog != null) {
+            mImportDialog.dismiss();
+            mImportDialog = null;
+        }
+        if (mRendererChoice == null) {
+            mRendererChoice = readRendererChoice();
+        }
+        final boolean dataReady = allRequiredPresent();
 
-        AlertDialog.Builder b = new AlertDialog.Builder(this);
-        b.setTitle("Game data required");
-        b.setMessage(msg);
-        b.setCancelable(false);
-        b.setPositiveButton("Select game files", new DialogInterface.OnClickListener() {
+        View panel = getLayoutInflater().inflate(R.layout.import_dialog, null);
+
+        String msg = (extraLine != null ? extraLine + "\n\n" : "");
+        if (dataReady) {
+            msg += "The game data is in place. Pick a renderer and start.";
+        } else {
+            msg += "Star Trek: Voyager - Elite Force needs the game data from your "
+                    + "retail copy of the game:\n\n"
+                    + "    pak0.pk3\n    pak1.pk3\n    pak2.pk3\n    pak3.pk3\n"
+                    + "    efgamex86.dll\n\n"
+                    + "(The paks are in the BaseEF folder of an installed copy; "
+                    + "pak0.pk3 is about 540 MB. efgamex86.dll is in the game's main "
+                    + "install folder and confirms you own the game.)\n\n"
+                    + "Copy them onto this device, then tap \"Select game files\" and "
+                    + "pick all of them.\n\n"
+                    + "Still missing: " + missingList();
+        }
+        ((TextView) panel.findViewById(R.id.import_body)).setText(msg);
+
+        RadioButton vulkan = panel.findViewById(R.id.import_renderer_vulkan);
+        RadioButton gles3 = panel.findViewById(R.id.import_renderer_gles3);
+        (RENDERER_GLES3.equalsIgnoreCase(mRendererChoice) ? gles3 : vulkan).setChecked(true);
+
+        RadioGroup group = panel.findViewById(R.id.import_renderer_group);
+        group.setOnCheckedChangeListener(new RadioGroup.OnCheckedChangeListener() {
             @Override
-            public void onClick(DialogInterface dialog, int which) {
-                openPicker();
+            public void onCheckedChanged(RadioGroup g, int id) {
+                chooseRenderer(id == R.id.import_renderer_gles3 ? RENDERER_GLES3 : RENDERER_VULKAN);
             }
         });
-        b.setNegativeButton("Quit", new DialogInterface.OnClickListener() {
+
+        Button primary = panel.findViewById(R.id.import_select);
+        primary.setText(dataReady ? "Start game" : "Select game files");
+        primary.setOnClickListener(new View.OnClickListener() {
             @Override
-            public void onClick(DialogInterface dialog, int which) {
+            public void onClick(View v) {
+                if (allRequiredPresent()) {
+                    launchGame();
+                } else {
+                    openPicker();
+                }
+            }
+        });
+        panel.findViewById(R.id.import_quit).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
                 finish();
             }
         });
-        b.show();
+
+        Dialog d = new Dialog(this);
+        d.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        d.setContentView(panel);
+        d.getWindow().setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+        d.setCancelable(false);
+        mImportDialog = d;
+        d.show();
     }
 
     private void showFatal(String msg) {
@@ -378,7 +446,7 @@ public class ImportActivity extends Activity {
                         if (fError != null) {
                             showImportDialog(fError);
                         } else if (allRequiredPresent()) {
-                            askRendererThenLaunch();
+                            firstRunOrLaunch();
                         } else {
                             showImportDialog("Some required files are still missing.");
                         }

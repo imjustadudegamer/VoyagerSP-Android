@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Literal colours only: an OEM alert skin showed the themed window white-on-white,
+     so nothing here resolves through a theme. The renderer rows sit above the
+     buttons so the choice is visible before the user picks any game files. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:padding="20dp">
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="#F01B1B22">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="18dp">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Game data required"
+                android:textColor="#FFFFFFFF"
+                android:textSize="20sp"
+                android:textStyle="bold"/>
+
+            <TextView
+                android:id="@+id/import_body"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:textColor="#FFD8D8DE"
+                android:textSize="14sp"/>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:text="Renderer:"
+                android:textColor="#FFD8D8DE"
+                android:textSize="14sp"/>
+
+            <RadioGroup
+                android:id="@+id/import_renderer_group"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:orientation="vertical">
+
+                <RadioButton
+                    android:id="@+id/import_renderer_vulkan"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:buttonTint="#FF6FA8FF"
+                    android:minHeight="40dp"
+                    android:paddingStart="6dp"
+                    android:text="Vulkan (default)"
+                    android:textColor="#FFFFFFFF"
+                    android:textSize="16sp"/>
+
+                <RadioButton
+                    android:id="@+id/import_renderer_gles3"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:buttonTint="#FF6FA8FF"
+                    android:minHeight="40dp"
+                    android:paddingStart="6dp"
+                    android:text="OpenGL ES 3.2"
+                    android:textColor="#FFFFFFFF"
+                    android:textSize="16sp"/>
+            </RadioGroup>
+
+            <TextView
+                android:id="@+id/import_renderer_note"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:text="Applies to this launch. Change it later in Settings -&gt; Video -&gt; Renderer."
+                android:textColor="#FFA8A8B4"
+                android:textSize="12sp"/>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:gravity="end"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/import_quit"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="#FF3A3F48"
+                    android:paddingStart="16dp"
+                    android:paddingEnd="16dp"
+                    android:text="Quit"
+                    android:textAllCaps="false"
+                    android:textColor="#FFFFFFFF"/>
+
+                <Button
+                    android:id="@+id/import_select"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:background="#FF2F6FA8"
+                    android:paddingStart="16dp"
+                    android:paddingEnd="16dp"
+                    android:text="Select game files"
+                    android:textAllCaps="false"
+                    android:textColor="#FFFFFFFF"/>
+            </LinearLayout>
+        </LinearLayout>
+    </ScrollView>
+</FrameLayout>
