@@ -194,6 +194,8 @@ com.voyager.efsp.desktop                root copy, required by appimagetool
 com.voyager.efsp.png                    root icon, required by appimagetool
 .DirIcon -> com.voyager.efsp.png
 usr/bin/voyagersp                       the engine (also the importer)
+usr/lib/renderer_vulkan.so              the renderer module, dlopen()ed at CL_InitRef
+usr/lib/renderer_gles3.so               second renderer module (GLES 3; inert, see below)
 usr/lib/libefgame.so                    game + cgame + icarus (+speedrun), dlopen()ed
 usr/lib/libefui.so                      the SP UI module, dlopen()ed
 usr/lib/libSDL2-2.0.so.0                vendored SDL 2.30.9
@@ -208,7 +210,7 @@ usr/share/icons/hicolor/256x256/apps/com.voyager.efsp.png
 usr/share/doc/voyagersp/{LICENSE,CREDITS.md,COPYING-NOTES.txt}
 ```
 
-18 files, ~4 MB. The icon is the tree's own Android launcher icon
+20 files, ~4 MB. The icon is the tree's own Android launcher icon
 (`EFAndroid-SP/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png`), copied at build
 time — no artwork was generated or captured for this.
 
@@ -219,13 +221,41 @@ time — no artwork was generated or captured for this.
 | `libSDL2-2.0.so.0` | yes | version-controllable, vendored, and the distro SDL varies; the AppImage should not depend on a 2022 SDL |
 | `libavformat` / `libavcodec` / `libswscale` / `libavutil` | yes | the SONAMEs differ across distros (`libavcodec` 58/59/60/61) — linking the host's is not an option |
 | `libefgame.so`, `libefui.so` | yes | the engine `dlopen()`s them by bare name |
-| `libvulkan.so.1` | **fallback only** | the loader must match the host's driver stack (see below) |
+| `renderer_vulkan.so`, `renderer_gles3.so` | yes | the renderer is a loadable module now; the engine `dlopen()`s it by name and is fatal without it |
+| `libvulkan.so.1` | **fallback only** | the loader must match the host's driver stack (see below). Neither the client nor `renderer_vulkan.so` links it any more — the client still calls `SDL_Vulkan_LoadLibrary`, so *SDL* `dlopen`s it at run time |
 | glibc (`libc`, `libm`, `libdl`, `libpthread`, `librt`, `libresolv`, `ld-linux`) | no | always the host's; bundling glibc cannot work |
 | `libstdc++.so.6`, `libgcc_s.so.1` | no | bundling an older libstdc++ shadows the host's for everything that `dlopen()`s into the process, and Mesa's Vulkan drivers are C++. The measured floor (3.4.29) is below every glibc-2.35 distro's. |
 | X11 (`libX11`, `libXcursor`, `libXrandr`, `libXi`, `libXfixes`, `libXss`, `libxcb`), Wayland client | no | SDL loads them at run time; they must match the running display server |
 | ALSA (`libasound`), PulseAudio (`libpulse`) | no | same: desktop-owned, loaded dynamically by SDL |
 | `libz`, `libbz2`, `liblzma`, … | no | never needed: the FFmpeg build is `--disable-autodetect` and the engine carries its own zlib |
 | `libopenal.so.1` | no | the engine's default is `s_useOpenAL 0` (`snd_main.c`), i.e. the built-in mixer over SDL audio; OpenAL is an opt-in that `dlopen()`s and falls back cleanly if absent. Bundling it would drag libsndfile/FLAC/libogg into the image for an opt-in path. |
+
+### Renderer modules: where they go, and why
+
+Since the client stopped linking the renderer, `CL_InitRef` builds
+`renderer_<cl_renderer>.so` (Linux name, no `lib` prefix) and calls
+`Sys_LoadDll(name, qtrue)`. The measured search order on Linux
+(`efcode/sys/sys_main.c`) is:
+
+1. `dlopen(name)` by bare name — resolved through the caller's `DT_RUNPATH`
+   (`$ORIGIN/../lib:$ORIGIN` on the packaged engine) and `LD_LIBRARY_PATH`
+   (AppRun sets it to `$APPDIR/usr/lib`);
+2. `Sys_BinaryPath()/name` — the directory of `argv[0]`, i.e. `usr/bin/`;
+3. `fs_basepath/name` — the user's data root.
+
+The **CWD is never searched**, so a module found only by luck of the working
+directory is not a concern here: the modules are installed into `usr/lib`
+together with `libefgame.so`/`libefui.so`, and step 1 finds them by two
+independent mechanisms (RUNPATH and `LD_LIBRARY_PATH`). A failure to load is
+fatal in the engine (`Com_Error: Failed to load renderer`), which is why
+`build-appimage.sh` refuses to package a `Release/` without `renderer_*.so`.
+
+The pipeline stages **every** `renderer_*.so` the build produces, so adding or
+removing a renderer is an engine-side decision, not a packaging one. On this tree
+that is `renderer_vulkan.so` (the shipping backend, `cl_renderer vulkan`) and
+`renderer_gles3.so` — the latter is **inert**: its backend is still being
+written and it reports `renderer_backend_ready() = 0`, so the client never offers
+it. If the engine stops building one of them, the image simply stops carrying it.
 
 **The GPU driver is the host's, always.** The image contains no `libvulkan_*.so`,
 no ICD JSON, no GL driver. `AppRun` prefers the host's `libvulkan.so.1` (found
@@ -290,10 +320,10 @@ engine's documented exit code 4, not a packaging gap.
 * Library closure and file set are deterministic (sorted `find`, no build-host
   paths in the binaries: the tree already maps `__FILE__` to `/src`, and the
   packaging build passes `CMAKE_SKIP_BUILD_RPATH=ON`).
-* Verified on the current payload: three independent packs of the same snapshot
-  produced the identical sha256
-  `13f12e7b889e7863a306c22f343a8e4d9e03013721fa1c734742b5e243b24f42`
-  (the value in `dist/*.sha256`), and an earlier payload behaved the same.
+* Verified on the current payload: independent packs of the same snapshot
+  produce the identical sha256 recorded in `dist/*.sha256`, and so does a full
+  rebuild from the same sources (the compile is deterministic too: rebuilding
+  after unrelated edits gave byte-identical binaries).
 
 Rebuilding the *engine* changes the payload by design (new hashes). The
 `build-info.txt` records the input hashes so two images can be told apart.
@@ -397,7 +427,7 @@ run.
 | `error while loading shared libraries: libc.so.6: version GLIBC_2.35 not found` | host older than the floor; see the matrix |
 | renderer initialises then `VK_ERROR_*` | no working Vulkan driver for the GPU; check `vulkaninfo` |
 | `no system libvulkan.so.1 — using the bundled loader` | host has a driver but no loader package; install `libvulkan1` if the game then fails to enumerate devices |
-| first run does not ask for the retail files | the engine-side importer is not in this build yet (see the note under [Data root and first run](#data-root-and-first-run)) |
+| `Failed to load renderer "renderer_vulkan.so"` | the renderer module is missing from `usr/lib` (should never happen: the pipeline refuses to package without it, and the payload is verified after packing) |
 | no sound | SDL found neither ALSA nor PulseAudio; or the album was muted with `+set s_initsound 0` |
 
 Diagnostics that do not launch the game:

@@ -104,6 +104,10 @@ PKGS=(
     libx11-dev libxext-dev libxcursor-dev libxi-dev libxrandr-dev libxss-dev
     libxinerama-dev libxfixes-dev libxrender-dev
     libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev
+    # OpenGL ES 3 headers: the tree builds renderer_gles3.so as a second renderer
+    # module on Linux too (its backend is not implemented yet and it reports
+    # renderer_backend_ready()=0, but the source needs GLES3/gl3.h to compile).
+    libgles2-mesa-dev
 )
 
 need_install=0

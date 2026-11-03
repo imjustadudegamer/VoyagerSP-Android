@@ -252,6 +252,14 @@ build_all() {
     mkdir -p "$ENGINE_BUILD"
     echo "$fingerprint" > "$ENGINE_BUILD/.fingerprint"
 
+    # The payload's renderer list is a glob over $RELEASE, so an artifact left there
+    # by an earlier configuration is indistinguishable from a fresh one: a module
+    # that no longer builds on this platform (the GLES renderer is Android-only now)
+    # would be packaged as though it were current. Start each build from an empty
+    # output directory; CMakeFiles and the object files stay, so only the link step
+    # is repeated.
+    rm -rf "$RELEASE"
+
     local cmake_args=(
         -S "$REPO/EFAndroid-SP/app/jni"
         -B "$ENGINE_BUILD"
@@ -311,22 +319,36 @@ build_all() {
     for f in voyagersp libefgame.so libefui.so; do
         [ -f "$RELEASE/$f" ] || die "expected build output is missing: $RELEASE/$f"
     done
-    info "outputs: $(cd "$RELEASE" && ls -l voyagersp libefgame.so libefui.so | awk '{printf "%s=%s ", $9, $5}')"
+    # The renderer is a loadable module since the client stopped linking it
+    # (USE_RENDERER_DLOPEN); a release without it starts and dies in CL_InitRef.
+    compgen -G "$RELEASE/renderer_*.so" >/dev/null         || die "no renderer module (renderer_*.so) in $RELEASE — the client would fail at CL_InitRef"
+    info "outputs: $(cd "$RELEASE" && ls -l voyagersp libefgame.so libefui.so renderer_*.so | awk '{printf "%s=%s ", $9, $5}')"
 }
+
+# Names of the files we build ourselves and stage: usr/bin/voyagersp plus these
+# in usr/lib. Filled by snapshot_outputs(), used by everything after it.
+OUR_NAMES=()
 
 snapshot_outputs() {
     log "snapshot of the build outputs"
     rm -rf "$SNAP"
     mkdir -p "$SNAP"
-    local f
-    for f in voyagersp libefgame.so libefui.so; do
+    local files=(voyagersp libefgame.so libefui.so) f
+    # Every renderer module the build produced: the client dlopen()s
+    # renderer_<cl_renderer>.so at CL_InitRef and is fatal without it.
+    for f in "$RELEASE"/renderer_*.so; do
+        [ -f "$f" ] && files+=("$(basename "$f")")
+    done
+    [ ${#files[@]} -ge 4 ] || die "no renderer module in $RELEASE (expected renderer_*.so)"
+    for f in "${files[@]}"; do
         # Copy, then confirm the copy matches what was read: the tree may be rebuilt
         # by another agent while we package, and a half-written .so must never ship.
         cp -p "$RELEASE/$f" "$SNAP/$f"
         [ "$(sha256_of "$RELEASE/$f")" = "$(sha256_of "$SNAP/$f")" ] \
             || die "$f changed while it was being copied; re-run the build"
-        printf '   %-14s %10s bytes  sha256 %s\n' "$f" "$(stat -c%s "$SNAP/$f")" "$(sha256_of "$SNAP/$f")"
+        printf '   %-18s %10s bytes  sha256 %s\n' "$f" "$(stat -c%s "$SNAP/$f")" "$(sha256_of "$SNAP/$f")"
     done
+    OUR_NAMES=("${files[@]}")
 }
 
 # ---------------------------------------------------------------- AppDir stage
@@ -377,7 +399,10 @@ stage_libs() {
     # the log states where each library came from and nothing is copied twice.
     local queue=() copied=() skipped=()
     local f name path dest ldd_out cmd=()
-    queue=("$APPDIR/usr/bin/voyagersp" "$APPDIR/usr/lib/libefgame.so" "$APPDIR/usr/lib/libefui.so")
+    queue=("$APPDIR/usr/bin/voyagersp")
+    for f in "${OUR_NAMES[@]}"; do
+        [ "$f" = voyagersp ] || queue+=("$APPDIR/usr/lib/$f")
+    done
 
     while [ ${#queue[@]} -gt 0 ]; do
         f=${queue[0]}
@@ -427,9 +452,19 @@ stage_appdir() {
              "$APPDIR"/usr/share/icons/hicolor/256x256/apps \
              "$APPDIR"/usr/share/doc/voyagersp "$APPDIR"/usr/lib/vulkan
 
-    install -m 0755 "$SNAP/voyagersp"    "$APPDIR/usr/bin/voyagersp"
-    install -m 0755 "$SNAP/libefgame.so" "$APPDIR/usr/lib/libefgame.so"
-    install -m 0755 "$SNAP/libefui.so"   "$APPDIR/usr/lib/libefui.so"
+    local n
+    for n in "${OUR_NAMES[@]}"; do
+        if [ "$n" = voyagersp ]; then
+            install -m 0755 "$SNAP/$n" "$APPDIR/usr/bin/$n"
+        else
+            # The engine dlopen()s these by bare name:
+            #   libefgame.so / libefui.so   (SP game + UI)
+            #   renderer_<cl_renderer>.so   (the renderer, from CL_InitRef)
+            # usr/lib is where the loader looks: the engine's RUNPATH is
+            # $ORIGIN/../lib:$ORIGIN and AppRun puts usr/lib on LD_LIBRARY_PATH.
+            install -m 0755 "$SNAP/$n" "$APPDIR/usr/lib/$n"
+        fi
+    done
 
     # --- icon: the Android launcher icon, the only artwork the tree ships ------
     local icon=$REPO/EFAndroid-SP/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
@@ -470,8 +505,13 @@ EOF
     stage_libs
 
     # --- Vulkan loader fallback ----------------------------------------------
-    # Kept out of usr/lib on purpose: it is only used when the host has none (see
-    # AppRun). Bundling the loader is a last resort, never the default.
+    # Re-examined after the renderer became a module: neither the client nor
+    # renderer_vulkan.so links Vulkan any more (NEEDED: only libm/libc there), and
+    # the client still imports SDL_Vulkan_LoadLibrary, i.e. *SDL* dlopens
+    # libvulkan.so.1 at run time (the string is inside our bundled libSDL2). So the
+    # loader is still a runtime requirement, but it must never shadow the host's:
+    # it lives in usr/lib/vulkan, is not on LD_LIBRARY_PATH, and AppRun only points
+    # SDL_VULKAN_LIBRARY at it when the host has no loader at all.
     local loader=
     if [ "$BUILDER" = box ]; then
         loader=$ROOTFS/usr/lib/x86_64-linux-gnu/libvulkan.so.1
@@ -489,15 +529,22 @@ EOF
 
     # --- strip + rpath -------------------------------------------------------
     log "stripping our binaries and setting RUNPATH"
-    run strip --strip-unneeded "$APPDIR/usr/bin/voyagersp" \
-                              "$APPDIR/usr/lib/libefgame.so" \
-                              "$APPDIR/usr/lib/libefui.so"
+    local n
+    for n in "${OUR_NAMES[@]}"; do
+        if [ "$n" = voyagersp ]; then
+            run strip --strip-unneeded "$APPDIR/usr/bin/$n"
+        else
+            run strip --strip-unneeded "$APPDIR/usr/lib/$n"
+        fi
+    done
     # $ORIGIN, so the engine and its dlopen()ed modules find usr/lib next to
     # themselves even when something starts them without AppRun's
     # LD_LIBRARY_PATH (a file manager, the desktop file, an extracted AppDir).
     if run sh -c 'command -v patchelf >/dev/null 2>&1'; then
         run patchelf --set-rpath '$ORIGIN/../lib:$ORIGIN' "$APPDIR/usr/bin/voyagersp"
-        run patchelf --set-rpath '$ORIGIN' "$APPDIR/usr/lib/libefgame.so" "$APPDIR/usr/lib/libefui.so"
+        for n in "${OUR_NAMES[@]}"; do
+            [ "$n" = voyagersp ] || run patchelf --set-rpath '$ORIGIN' "$APPDIR/usr/lib/$n"
+        done
     elif [ "$BUILDER" = box ]; then
         die "patchelf is missing from the build box — re-run setup-buildbox.sh"
     else
@@ -510,6 +557,15 @@ EOF
 }
 
 # --------------------------------------------------------------- verification
+# Paths (inside the AppDir) of every ELF this pipeline builds itself.
+payload_elfs() {
+    printf '%s\n' usr/bin/voyagersp
+    local n
+    for n in "${OUR_NAMES[@]}"; do
+        [ "$n" = voyagersp ] || printf 'usr/lib/%s\n' "$n"
+    done
+}
+
 max_symbol_version() {   # $1 file, $2 prefix (GLIBC | GLIBCXX); empty when none
     run objdump -T "$1" 2>/dev/null | grep -o "$2_[0-9.]*" | sort -V | tail -1 || true
 }
@@ -519,7 +575,7 @@ verify_static() {
     local f g c r
     printf '   %-24s %-12s %-12s %s\n' file GLIBC GLIBCXX RUNPATH
 
-    for f in usr/bin/voyagersp usr/lib/libefgame.so usr/lib/libefui.so; do
+    for f in $(payload_elfs); do
         g=$(max_symbol_version "$APPDIR/$f" GLIBC)
         c=$(max_symbol_version "$APPDIR/$f" GLIBCXX)
         r=$(run readelf -d "$APPDIR/$f" 2>/dev/null | awk '/RUNPATH|RPATH/{sub(/.*\[/,"");sub(/\].*/,"");printf "%s ", $0}')
@@ -552,15 +608,19 @@ verify_static() {
     esac
 
     # Relocatable rpath on everything we own?
-    for f in usr/bin/voyagersp usr/lib/libefgame.so usr/lib/libefui.so; do
+    for f in $(payload_elfs); do
         run readelf -d "$APPDIR/$f" | grep -q 'RUNPATH\|RPATH' \
             || warn "no RUNPATH in $f (relies on AppRun's LD_LIBRARY_PATH)"
     done
 
     # No host build path may leak into the shipped binaries.
     local leaks
-    leaks=$(run sh -c "grep -c '$HOME' '$APPDIR/usr/bin/voyagersp' '$APPDIR/usr/lib/libefgame.so' 2>/dev/null | awk -F: '{s+=\$2} END {print s+0}'")
-    [ "${leaks:-0}" = "0" ] || warn "$leaks occurrence(s) of the build home path ($HOME) inside the binaries"
+    local leaks=0 n le
+    for n in $(payload_elfs); do
+        le=$(run sh -c "grep -c '$HOME' '$APPDIR/$n' 2>/dev/null || true")
+        leaks=$((leaks + ${le:-0}))
+    done
+    [ "$leaks" = "0" ] || warn "$leaks occurrence(s) of the build home path ($HOME) inside the payload binaries"
 
     # Closure completeness: every NEEDED of every staged ELF must resolve from the
     # staged tree + the host-provided set (as seen by the build rootfs).
@@ -580,14 +640,11 @@ verify_static() {
     # ldd -r: undefined symbols must be resolvable from the staged tree. The game
     # modules reach the engine through the game_import_t / ui_import_t tables, not
     # through dynamic symbols, so they are expected to be clean too.
-    local undefined
-    undefined=$(run env LD_LIBRARY_PATH="$APPDIR/usr/lib" sh -c \
-        "ldd -r '$APPDIR/usr/bin/voyagersp' 2>&1 | grep -c 'undefined symbol'" || true)
-    info "ldd -r voyagersp: ${undefined:-0} undefined symbol(s)"
-    for f in libefgame.so libefui.so; do
+    local undefined f
+    for f in $(payload_elfs); do
         undefined=$(run env LD_LIBRARY_PATH="$APPDIR/usr/lib" sh -c \
-            "ldd -r '$APPDIR/usr/lib/$f' 2>&1 | grep -c 'undefined symbol'" || true)
-        info "ldd -r $f: ${undefined:-0} undefined symbol(s)"
+            "ldd -r '$APPDIR/$f' 2>&1 | grep -c 'undefined symbol'" || true)
+        info "ldd -r $(basename "$f"): ${undefined:-0} undefined symbol(s)"
     done
 
     # AppRun must be a valid POSIX shell script and executable.
@@ -693,10 +750,14 @@ write_release_info() {
         printf 'SDL2            : %s (vendored, built from EFAndroid-SP/app/jni/SDL)\n' "$SDL2_VERSION"
         printf 'FFmpeg          : %s minimal build (%s; bink demuxer + protocol=file only)\n' "$FFMPEG_VERSION" "$FFMPEG_CODECS"
         printf 'squashfs        : zstd level 19, all-time %s\n\n' "$EPOCH"
-        printf 'inputs (snapshot):\n'
-        for f in voyagersp libefgame.so libefui.so; do
-            printf '  %-14s %10s  sha256 %s\n' "$f" "$(stat -c%s "$SNAP/$f")" "$(sha256_of "$SNAP/$f")"
+        printf 'payload (built from the tree in this run):\n'
+        for f in "${OUR_NAMES[@]}"; do
+            printf '  %-18s %10s  sha256 %s\n' "$f" "$(stat -c%s "$SNAP/$f")" "$(sha256_of "$SNAP/$f")"
         done
+        printf '\nmodule placement: usr/lib (engine RUNPATH \$ORIGIN/../lib:\$ORIGIN, and\n'
+        printf 'AppRun puts usr/lib on LD_LIBRARY_PATH). Sys_LoadDll() order on Linux:\n'
+        printf 'dlopen(bare name) -> Sys_BinaryPath()/name -> fs_basepath/name; never CWD.\n'
+
         printf '\nbundled libraries (%s):\n' "$(ls "$APPDIR/usr/lib" | grep -c .)"
         ls "$APPDIR/usr/lib" | grep -v '^vulkan$' | sed 's/^/  /'
         printf '  vulkan/libvulkan.so.1   (fallback only, not on LD_LIBRARY_PATH)\n'
@@ -728,6 +789,8 @@ main() {
     else
         info "--no-build: using the existing $RELEASE"
         [ -f "$RELEASE/voyagersp" ] || die "no build to package at $RELEASE (run without --no-build)"
+        compgen -G "$RELEASE/renderer_*.so" >/dev/null \
+            || die "no renderer module in $RELEASE — refusing to package a client that cannot load one"
     fi
     snapshot_outputs
     stage_appdir
