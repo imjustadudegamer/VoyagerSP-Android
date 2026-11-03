@@ -1414,6 +1414,10 @@ static void UI_Init( int apiVersion, uiimport_t *uiimport ) {
 	ui.Cvar_Create( "cg_drawCrosshairNames", "1", CVAR_ARCHIVE );
 	ui.Cvar_Create( "cg_marks", "1", CVAR_ARCHIVE );
 	ui.Cvar_Create ("ui_initialsetup", "0", CVAR_ARCHIVE );
+	// First-run renderer choice: 1 once the Renderer page has been shown (or the
+	// renderer picked), so the picker never comes back. Fresh installs are
+	// detected through ui_initialsetup, the retail first-run marker.
+	ui.Cvar_Create ("ui_rendererPicked", "0", CVAR_ARCHIVE );
 	ui.Cvar_Create ("g_language", "", CVAR_ARCHIVE | CVAR_NORESTART);
 	ui.Cvar_Create ("s_language", "", CVAR_ARCHIVE | CVAR_NORESTART);
 	ui.Cvar_Create ("k_language", "", CVAR_ARCHIVE | CVAR_NORESTART);

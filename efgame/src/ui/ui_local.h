@@ -1952,6 +1952,14 @@ extern void UI_SaveGameMenu( int );
 extern void UI_ExploreMenu( void );
 extern void	UI_Setup_MenuButtons(void);
 extern void UI_VideoDataMenu( void );
+
+// Renderer-selection helpers (ui_video.cpp). UI_RendererChoiceAvailable() is
+// the same >1-module test the video menu's Renderer row uses; the first-run
+// hook in UI_MainMenu calls UI_VideoDataMenu_FirstRunRenderer() to land on that
+// row. Declared here so the two files share one implementation -- the first-run
+// screen is the normal video page, not a second picker.
+extern qboolean UI_RendererChoiceAvailable( void );
+extern void UI_VideoDataMenu_FirstRunRenderer( void );
 extern void InGame_MenuButtonsInit(menuframework_s *menu);
 
 

@@ -145,6 +145,18 @@ static menulist_s			s_video_texture_mode_list;
 static menulist_s			s_video_simpleshaders_list;
 static menulist_s			s_video_compresstextures;
 static menuaction_s			s_video_apply_action;
+
+// ---- Renderer selection (Phase 2) ------------------------------------------
+// `cl_renderer` names the renderer *module* the client loads at startup. There
+// is no live switch: the module is dlopen()ed once, before any UI exists, so the
+// row stores the choice for the next start and says so on screen. The row is
+// only built when the installation actually ships more than one module
+// (engine-published cl_rendererModules), and the same row + write path are used
+// by the video menu and by the first-run picker.
+static menulist_s			s_video_renderer_list;
+static qboolean				s_rendererRowBuilt = qfalse;
+static qboolean				s_rendererPickerActive = qfalse;
+
 static menubitmap_s			s_video_drivers;
 static menubitmap_s			s_video_data;
 static menubitmap_s			s_video_data2;
@@ -273,6 +285,127 @@ static const char *s_drivers[] =
 
 static void ApplyChanges( void *unused, int notification );
 static void ApplyChanges2( void *unused, int notification );
+
+/*
+=======================================================================
+
+RENDERER SELECTION
+
+=======================================================================
+*/
+
+// Backends this build can name. Slot order is what the row's value list uses:
+// 0 = vulkan (the compiled default), 1 = gles3. Must match the module names in
+// the engine (CL_SetRenderer_f/CL_RendererModuleFileName).
+static const char *s_renderer_backends[] = { "vulkan", "gles3" };
+#define RENDERER_BACKEND_COUNT ((int)( sizeof( s_renderer_backends ) / sizeof( s_renderer_backends[0] ) ))
+
+// Value-list display slots. They reuse the MNT_ entries of the retail "GL
+// DRIVER" row, which is not built into this menu, and their text is assigned
+// in code below -- the MNT/MBT enums are positional against ext_data/*.dat, so
+// inserting a new entry would shift every label after it.
+static int s_renderer_Names[] =
+{
+	MNT_VIDEO_DRIVER_DEFAULT,	// "VULKAN"    (assigned in VideoData_MenuInit)
+	MNT_VIDEO_DRIVER_VOODOO,	// "GLES 3.2"  (assigned in VideoData_MenuInit)
+	MNT_NONE
+};
+
+static int Renderer_ModuleCount( void )
+{
+	char	buf[128];
+	int		i, count, inToken;
+
+	ui.Cvar_VariableStringBuffer( "cl_rendererModules", buf, sizeof( buf ) );
+
+	count = 0;
+	inToken = 0;
+	for ( i = 0; buf[i]; i++ ) {
+		if ( buf[i] == ' ' ) {
+			inToken = 0;
+		} else if ( !inToken ) {
+			inToken = 1;
+			count++;
+		}
+	}
+	return count;
+}
+
+static int Renderer_CurrentIndex( void )
+{
+	char	buf[MAX_CVAR_VALUE_STRING];
+
+	ui.Cvar_VariableStringBuffer( "cl_renderer", buf, sizeof( buf ) );
+	if ( !Q_stricmp( buf, "gles3" ) )
+		return 1;
+	return 0;	// vulkan is the default
+}
+
+// The one write path, shared by the video menu row and the first-run picker.
+// The engine command validates the name against the installed modules, stores
+// the choice in the forced (non-latched) form so no vid_restart can try to
+// switch live, and writes the config immediately (the app is usually swiped
+// away, not quit).
+static void RendererRow_Apply( int index )
+{
+	const char	*want;
+	char		cmd[64], cur[MAX_CVAR_VALUE_STRING];
+
+	if ( index < 0 || index >= RENDERER_BACKEND_COUNT )
+		return;
+
+	want = s_renderer_backends[index];
+
+	ui.Cvar_VariableStringBuffer( "cl_renderer", cur, sizeof( cur ) );
+	if ( !Q_stricmp( cur, want ) )
+		return;		// unchanged: nothing to store, no spurious "restart" note
+
+	Com_sprintf( cmd, sizeof( cmd ), "setrenderer %s\n", want );
+	ui.Cmd_ExecuteText( EXEC_NOW, cmd );
+
+	// The first-run prompt never comes back, whatever happens next.
+	ui.Cvar_Set( "ui_rendererPicked", "1" );
+}
+
+static void RendererCallback( void *s, int notification )
+{
+	if ( notification != QM_ACTIVATED )
+		return;
+
+	RendererRow_Apply( s_video_renderer_list.curvalue );
+}
+
+// Does this installation have a real choice? (Public: the first-run hook in
+// UI_MainMenu uses the same test as the row itself.)
+qboolean UI_RendererChoiceAvailable( void )
+{
+	return ( Renderer_ModuleCount() > 1 ) ? qtrue : qfalse;
+}
+
+static int Renderer_RowIndex( void )
+{
+	int i;
+
+	for ( i = 0; i < s_video_menu.nitems; i++ ) {
+		if ( s_video_menu.items[i] == (void *)&s_video_renderer_list )
+			return i;
+	}
+	return -1;
+}
+
+// First-run entry point: opens the ordinary video page and parks the cursor on
+// the renderer row. No separate picker page, no second write path.
+void UI_VideoDataMenu_FirstRunRenderer( void )
+{
+	int index;
+
+	s_rendererPickerActive = qtrue;
+	UI_VideoDataMenu();
+
+	index = Renderer_RowIndex();
+	if ( index >= 0 )
+		Menu_SetCursor( &s_video_menu, index );
+}
 
 /*
 =======================================================================
@@ -623,6 +756,13 @@ static void GetVideoMenuItemValues( void )
 	case 32:
 		s_video_colordepth_list.curvalue = 2;
 		break;
+	}
+
+	if ( s_rendererRowBuilt )
+	{
+		// Reflect the stored choice (which is also what is loaded until the next
+		// start -- see the restart note in M_VideoDataMenu_Graphics).
+		s_video_renderer_list.curvalue = Renderer_CurrentIndex();
 	}
 
 	if ( s_video_fullscreen_list.curvalue == 0 )
@@ -1024,6 +1164,25 @@ void M_VideoDataMenu_Graphics (void)
 
 	UI_DrawHandlePic(174,420, 320, 8, uis.whiteShader);	// Bottom line
 
+	// The renderer module is loaded once per start, so a stored choice only
+	// takes effect on the next launch. Say so while cl_renderer differs from the
+	// module this run actually loaded (cl_rendererLoaded, set by CL_InitRef).
+	if ( s_rendererRowBuilt )
+	{
+		char	cur[MAX_CVAR_VALUE_STRING], loaded[MAX_CVAR_VALUE_STRING];
+
+		ui.Cvar_VariableStringBuffer( "cl_renderer", cur, sizeof( cur ) );
+		ui.Cvar_VariableStringBuffer( "cl_rendererLoaded", loaded, sizeof( loaded ) );
+
+		if ( loaded[0] && Q_stricmp( cur, loaded ) )
+		{
+			UI_DrawProportionalString( 174, 398,
+				!Q_stricmp( cur, "gles3" ) ? "RESTART THE GAME TO USE GLES 3.2"
+				                           : "RESTART THE GAME TO USE VULKAN",
+				UI_SMALLFONT, colorTable[CT_LTGOLD1] );
+		}
+	}
+
 //	VideoDataMenu_Blinkies();
 
 //	UI_PrintMenuGraphics(videodatamenu_graphics,VDG_MAX);
@@ -1084,6 +1243,19 @@ sfxHandle_t VideoData_MenuKey (int key)
 				// EFSP: auto-apply pending video changes on exit instead of the "lose settings?" confirm
 				// (user request — don't ask). ApplyChanges commits the video cvars; then leave the menu.
 				ApplyChanges( NULL, QM_ACTIVATED );
+				if ( s_rendererPickerActive )
+				{
+					// First-run picker: the page was opened as the top-level screen
+					// (the main menu is not on the stack), so a plain pop would
+					// close the whole menu system. Leaving without choosing keeps
+					// the compiled default and lands on the main menu; the choice
+					// never comes back.
+					s_rendererPickerActive = qfalse;
+					ui.Cvar_Set( "ui_rendererPicked", "1" );
+					UI_PopMenu();
+					UI_MainMenu();
+					return( menu_out_sound );
+				}
 				UI_PopMenu();
 				return(menu_null_sound);
 				break;
@@ -1407,6 +1579,39 @@ static void VideoData_MenuInit( void )
 	s_video_compresstextures.listnames				= s_enable_Names;
 	s_video_compresstextures.width					= width;
 
+	// Renderer row, only when the installation actually ships more than one
+	// renderer module (cl_rendererModules, published by the engine at startup).
+	// Reuses the unused MBT_VIDEOLIGHTING label slot and assigns its text here:
+	// the MBT/MNT enums are positional against ext_data/sp_buttontext.dat and
+	// inserting an entry would shift every label after it (see
+	// android-port/UI_STRING_ALIGNMENT.md).
+	s_rendererRowBuilt = qfalse;
+	if ( UI_RendererChoiceAvailable() )
+	{
+		menu_button_text[MBT_VIDEOLIGHTING][0] = "RENDERER";
+		menu_button_text[MBT_VIDEOLIGHTING][1] = "Renderer used for the 3D view. A new choice is stored immediately and used the next time the game starts.";
+		menu_normal_text[MNT_VIDEO_DRIVER_DEFAULT] = "VULKAN";
+		menu_normal_text[MNT_VIDEO_DRIVER_VOODOO]  = "GLES 3.2";
+
+		y += inc;
+		s_video_renderer_list.generic.type		= MTYPE_SPINCONTROL;
+		s_video_renderer_list.generic.flags		= QMF_HIGHLIGHT_IF_FOCUS;
+		s_video_renderer_list.generic.x			= x;
+		s_video_renderer_list.generic.y			= y;
+		s_video_renderer_list.generic.callback	= RendererCallback;
+		s_video_renderer_list.textEnum			= MBT_VIDEOLIGHTING;
+		s_video_renderer_list.textcolor			= CT_BLACK;
+		s_video_renderer_list.textcolor2		= CT_WHITE;
+		s_video_renderer_list.color				= CT_DKPURPLE1;
+		s_video_renderer_list.color2			= CT_LTPURPLE1;
+		s_video_renderer_list.textX				= 5;
+		s_video_renderer_list.textY				= 2;
+		s_video_renderer_list.listnames			= s_renderer_Names;
+		s_video_renderer_list.width				= width;
+		s_video_renderer_list.curvalue			= Renderer_CurrentIndex();
+		s_rendererRowBuilt = qtrue;
+	}
+
 	s_video_apply_action.generic.type				= MTYPE_ACTION;
 	s_video_apply_action.generic.flags				= QMF_HIGHLIGHT_IF_FOCUS|QMF_GRAYED;
 	s_video_apply_action.generic.x					= 501;
@@ -1449,6 +1654,8 @@ static void VideoData_MenuInit( void )
 	Menu_AddItem( &s_video_menu, ( void * )&s_video_texture_mode_list);
 	Menu_AddItem( &s_video_menu, ( void * )&s_video_simpleshaders_list);
 	Menu_AddItem( &s_video_menu, ( void * )&s_video_compresstextures);
+	if ( s_rendererRowBuilt )
+		Menu_AddItem( &s_video_menu, ( void * )&s_video_renderer_list);
 	Menu_AddItem( &s_video_menu, ( void * )&s_video_apply_action);
 
 	Video_SideButtons(&s_video_menu,ID_VIDEODATA);

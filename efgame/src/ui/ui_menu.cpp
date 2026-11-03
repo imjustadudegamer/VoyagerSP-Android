@@ -3767,10 +3767,21 @@ so make sure that the attract loop server is down
 and that local cinematics are killed
 ===============
 */
+// Fresh install? Captured on the first UI_MainMenu() of this process, before
+// the initial-setup page can flip ui_initialsetup to 1. Existing installations
+// have the marker set and therefore never see the renderer picker.
+static qboolean s_rendererFirstRun;
+static qboolean s_rendererFirstRunKnown;
+
 void UI_MainMenu(void)
 {
 
 	ui.Cvar_Set("sv_killserver", "1");	// let the demo server know it should shut down
+
+	if ( !s_rendererFirstRunKnown ) {
+		s_rendererFirstRunKnown = qtrue;
+		s_rendererFirstRun = ui.Cvar_VariableValue( "ui_initialsetup" ) ? qfalse : qtrue;
+	}
 
 //#ifdef NDEBUG
 	if (!s_lcarsin_menu.initialized)	// Haven't played LCARS In menu yet
@@ -3805,6 +3816,17 @@ void UI_MainMenu(void)
 
 	ui.Key_SetCatcher( KEYCATCH_UI );
 	uis.menusp = 0;
+
+	// One-shot renderer choice for a fresh install. It reuses the normal video
+	// page (UI_VideoDataMenu_FirstRunRenderer parks the cursor on the Renderer
+	// row), so there is exactly one row and one write path. Backing out keeps
+	// the compiled default and falls through to this main menu, so the game is
+	// never blocked behind the picker; the marker guarantees it appears once.
+	if ( s_rendererFirstRun ) {
+		s_rendererFirstRun = qfalse;
+		if ( UI_RendererChoiceAvailable() && !ui.Cvar_VariableValue( "ui_rendererPicked" ) )
+			UI_VideoDataMenu_FirstRunRenderer();
+	}
 }
 
 /*
