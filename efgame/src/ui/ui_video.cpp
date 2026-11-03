@@ -551,7 +551,12 @@ static void GetVideoMenuItemValues( void )
 	// Aspect toggle: cg_forceAspect=1 means 4:3 pillarbox (curvalue 0); else 16:9/native (curvalue 1).
 	s_video_mode_list.curvalue = ui.Cvar_VariableValue( "cg_forceAspect" ) ? 0 : 1;
 
-	s_video_fullscreen_list.curvalue = 1;	// Android: always fullscreen (toggle removed from menu)
+#ifdef __ANDROID__
+	s_video_fullscreen_list.curvalue = 1;	// Android: one window, always fullscreen
+#else
+	// Desktop: reflect the live window state (0 = windowed, 1 = fullscreen).
+	s_video_fullscreen_list.curvalue = ui.Cvar_VariableValue( "r_fullscreen" ) ? 1 : 0;
+#endif
 	s_video_extension_enable_list.curvalue = ui.Cvar_VariableValue("r_allowExtensions");
 	s_video_simpleshaders_list.curvalue = ui.Cvar_VariableValue("r_lowEndVideo");
 	s_video_compresstextures.curvalue = ui.Cvar_VariableValue("r_ext_compress_textures");
@@ -639,6 +644,21 @@ static void FullscreenCallback( void *s, int notification )
 {
 	if (notification != QM_ACTIVATED)
 		return;
+
+#ifdef __ANDROID__
+	// No window to toggle: the row is not built into the Android menu, and the value stays pinned
+	// to fullscreen in GetVideoMenuItemValues (see there).
+	(void)s;
+#else
+	// Apply on selection, not on the Apply button. IN_Frame (sdl_input.c) watches r_fullscreen and
+	// vid_fullscreen and performs exactly ONE vid_restart when either changes (the swapchain extent is
+	// fixed at creation). Deferring this to ApplyChanges would change the cvar later and queue a second
+	// vid_restart for the same transition, so the toggle would restart the video system twice.
+	// Both names are written because the engine keeps r_fullscreen and vid_fullscreen in sync.
+	(void)s;
+	ui.Cvar_SetValue( "r_fullscreen", s_video_fullscreen_list.curvalue );
+	ui.Cvar_SetValue( "vid_fullscreen", s_video_fullscreen_list.curvalue );
+#endif
 }
 
 /*
@@ -1233,6 +1253,29 @@ static void VideoData_MenuInit( void )
 	s_video_mode_list.listnames						= s_aspect_names;
 	s_video_mode_list.width							= width;
 
+#ifndef __ANDROID__
+	// Windowed / fullscreen. Desktop only: Android has one window and is always fullscreen, so the row
+	// is not built there and GetVideoMenuItemValues keeps pinning it to 1 (see below).
+	// Reuses the existing MBT_VIDEOFULLSCREEN text slot and the OFF/ON list, so no string table or enum
+	// is touched (the MBT/MNT enums must stay aligned with retail ext_data/*.dat — see
+	// android-port/UI_STRING_ALIGNMENT.md; adding an enum entry mid-table shifts every label after it).
+	y += inc;
+	s_video_fullscreen_list.generic.type			= MTYPE_SPINCONTROL;
+	s_video_fullscreen_list.generic.flags			= QMF_HIGHLIGHT_IF_FOCUS;
+	s_video_fullscreen_list.generic.x				= x;
+	s_video_fullscreen_list.generic.y				= y;
+	s_video_fullscreen_list.generic.callback		= FullscreenCallback;
+	s_video_fullscreen_list.textEnum				= MBT_VIDEOFULLSCREEN;
+	s_video_fullscreen_list.textcolor				= CT_BLACK;
+	s_video_fullscreen_list.textcolor2				= CT_WHITE;
+	s_video_fullscreen_list.color					= CT_DKPURPLE1;
+	s_video_fullscreen_list.color2					= CT_LTPURPLE1;
+	s_video_fullscreen_list.textX					= 5;
+	s_video_fullscreen_list.textY					= 2;
+	s_video_fullscreen_list.listnames				= s_enable_Names;	// OFF / ON
+	s_video_fullscreen_list.width					= width;
+#endif
+
 	y += inc;
 	s_video_colordepth_list.generic.type			= MTYPE_SPINCONTROL;
 	s_video_colordepth_list.generic.flags			= QMF_HIGHLIGHT_IF_FOCUS;
@@ -1395,8 +1438,10 @@ static void VideoData_MenuInit( void )
 //	Menu_AddItem( &s_video_menu, ( void * )&s_video_driver_list);
 //	Menu_AddItem( &s_video_menu, ( void * )&s_video_extension_enable_list);
 	Menu_AddItem( &s_video_menu, ( void * )&s_video_mode_list);
+#ifndef __ANDROID__
+	Menu_AddItem( &s_video_menu, ( void * )&s_video_fullscreen_list);
+#endif
 	Menu_AddItem( &s_video_menu, ( void * )&s_video_colordepth_list);
-//	Menu_AddItem( &s_video_menu, ( void * )&s_video_fullscreen_list);
 //	Menu_AddItem( &s_video_menu, ( void * )&s_video_lighting_list);
 	Menu_AddItem( &s_video_menu, ( void * )&s_video_geometry_list);
 	Menu_AddItem( &s_video_menu, ( void * )&s_video_texture_quality_list);

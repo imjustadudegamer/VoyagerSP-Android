@@ -16,9 +16,9 @@
 #include <dlfcn.h>
 #include <string.h>
 #include <stdarg.h>
-#include <android/log.h>
+#include "sp_log.h"          // logcat on Android, stderr on Linux
 
-static void ulog(const char* fmt, ...){ va_list a; va_start(a,fmt); __android_log_vprint(ANDROID_LOG_INFO,"ui",fmt,a); va_end(a); }
+static void ulog(const char* fmt, ...){ va_list a; va_start(a,fmt); SP_LogLineV(SP_LOG_INFO,"ui",fmt,a); va_end(a); }
 
 // Com_Printf/Com_Error/Q_strncpyz are declared C++-linkage by q_shared.h here, so reference
 // them via the C-linkage shim (sp_clink.c) / a local copy instead of the mangled symbols.
@@ -228,7 +228,21 @@ extern "C" int SPUI_Load(void){
     ulog("SP UI loaded (UI_API_VERSION=%d)", UI_API_VERSION);
     return 1;
 }
-extern "C" void SPUI_Shutdown(void){ if(g_uiActive && g_ux && g_ux->UI_Shutdown) g_ux->UI_Shutdown(); g_uiActive=0; }
+extern "C" void SPUI_Shutdown(void){
+    if(g_uiActive && g_ux && g_ux->UI_Shutdown) g_ux->UI_Shutdown();
+    g_uiActive=0;
+    // Unload the module so the next SPUI_Load() starts from zeroed statics.
+    //
+    // The UI caches every media handle it registers (Menu_Cache and friends) in module-global
+    // state. The boot path loads the UI, plays the intro movie, then runs a renderer teardown
+    // (RE_Shutdown + R_Init -> CreateInternalShaders resets tr.numShaders) and loads the UI again.
+    // Reusing the still-loaded module meant the second UI_Init kept the PRE-teardown handles and the
+    // main menu drew with shader handles past the end of the rebuilt table ("R_GetShaderByHandle:
+    // out of range hShader 46/47/48" every frame). This is the same rule the game module already
+    // follows (SP_LoadGame/SP_UnloadGame): a reload is a fresh dlopen, never a reuse of dirty state.
+    // Platform-neutral: Android takes the identical path.
+    if(g_uilib){ dlclose(g_uilib); g_uilib=0; g_ux=0; }
+}
 extern "C" int  SPUI_IsActive(void){ return g_uiActive; }
 extern "C" void SPUI_Refresh(int t){ if(g_uiActive && g_ux->UI_Refresh) g_ux->UI_Refresh(t); }
 extern "C" void SPUI_KeyEvent(int key,int down){ if(g_uiActive && down && g_ux->UI_KeyEvent) g_ux->UI_KeyEvent(key); }
