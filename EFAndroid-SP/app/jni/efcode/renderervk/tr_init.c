@@ -24,8 +24,8 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "tr_local.h"
 #ifdef USE_GLES3_BACKEND
 #include "../renderergles3/gl_gles3_platform.h"
-// Exported by the GLES backend; 0 until the backend is verified to draw. While
-// it is 0 the module refuses to initialize, so the client falls back to Vulkan.
+// Exported by the GLES backend; 0 while the backend cannot draw. The module
+// refuses to initialize at 0, so the client falls back to Vulkan.
 Q_EXPORT int renderer_backend_ready( void );
 #endif
 

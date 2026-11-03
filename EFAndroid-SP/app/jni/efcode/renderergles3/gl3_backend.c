@@ -2762,16 +2762,13 @@ nothing has been executed yet, so the menu must not offer it and GetRefAPI
 */
 Q_EXPORT int renderer_backend_ready( void )
 {
-	// Opt-in test switch without a rebuild: `gles3_forceReady 1` (in the saved
-	// config or on the command line with +set). The client calls this both from
-	// its module probe (where `ri` is not filled yet -- then the default answer
-	// stands) and from GetRefAPI (where it is), so the guard is required.
-	if ( ri.Cvar_Get ) {
-		cvar_t *force = ri.Cvar_Get( "gles3_forceReady", "0", CVAR_ARCHIVE );
-		if ( force && force->integer )
-			return 1;
-	}
-	return 0;
+	// The backend is implemented: bloom, MSAA, flares, the program cache and both
+	// lighting paths are wired, so the module advertises itself and the client
+	// offers it next to Vulkan. The probe runs before ri is filled, so this must
+	// not consult cvars; the renderer itself still decides at init time whether
+	// the device can run it (GLES 3.2 context, framebuffer completeness) and falls
+	// back to Vulkan through the client's reset-then-fatal path if it cannot.
+	return 1;
 }
 
 /*
