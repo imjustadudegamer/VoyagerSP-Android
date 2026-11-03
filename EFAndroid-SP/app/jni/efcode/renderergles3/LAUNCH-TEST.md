@@ -75,14 +75,22 @@ game. Or edit `efspconfig.cfg` and replace `cl_renderer "gles3"` with
 `cl_renderer "vulkan"` and remove `gles3_forceReady`. No rebuild, no reinstall;
 `cl_rendererModules` will list only `vulkan` again.
 
-## 5. What is not implemented (expect missing visuals, not crashes)
+## 5. What to expect from the optional paths
 
-* bloom is ignored (`r_bloom` prints one warning), MSAA is ignored
-  (`r_ext_multisample` is logged but not honoured);
-* flares do nothing (`r_flares` has no effect);
-* `r_smp` is forced to 0 with a printed reason (single GL context);
-* `r_dlightMode` keeps the classic multipass dlight path;
-* static world geometry is re-submitted per draw (no world VBO);
-* no warm program cache across runs.
+* bloom: honoured (`r_bloom`, `r_bloom_threshold`, `_threshold_mode`,
+  `_intensity`, `_modulate`). The log prints nothing extra; a failed bloom
+  program build prints one warning and disables bloom.
+* MSAA: honoured (`r_ext_multisample`), except on Mali/PowerVR where it is
+  disabled with a printed line (the documented device-loss caution). The init
+  log prints the chosen `samples`.
+* flares: honoured (`r_flares`) through occlusion queries; cost is one 1px draw
+  and one query per flare per frame with a one-frame latency.
+* `r_smp` is forced to 0 with a printed reason (single GL context).
+* `r_dlightMode` 0 (classic multipass) and 1/2 (per-pixel) are both supported;
+  the per-pixel path uses the lighting pipeline defs created at init.
+* static world geometry is re-submitted per draw (no world VBO; deliberate).
+* the program binary cache lives at `<fs_homepath>/gl3_programs.bin` and is
+  revalidated against a vendor/renderer/version/uniform-size stamp each run;
+  any mismatch recompiles from source.
 
 `renderer_gles3/AUDIT.md` §5 has the full milestone table and remaining work.

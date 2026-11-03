@@ -121,6 +121,74 @@ static qboolean			gl3_context_lost;
 static int				gl3_texture_count;
 static qboolean			gl3_selftest_registered;
 
+// --- M4: MSAA + bloom ------------------------------------------------------
+static int				gl3_samples;			// 1 = no MSAA
+static GLuint			gl3_msaa_fbo;
+static GLuint			gl3_msaa_color;			// multisampled colour renderbuffer
+static GLuint			gl3_msaa_depth;			// multisampled depth/stencil renderbuffer
+
+#define GL3_BLOOM_LEVELS 4
+// [0] = extraction buffer, then a horizontal/vertical pair per level.
+static GLuint			gl3_bloom_tex[1 + GL3_BLOOM_LEVELS * 2];
+static int				gl3_bloom_w[1 + GL3_BLOOM_LEVELS * 2];
+static int				gl3_bloom_h[1 + GL3_BLOOM_LEVELS * 2];
+static GLuint			gl3_bloom_fbo;
+static qboolean			gl3_bloom_pending;
+static GLuint			gl3_prog_extract, gl3_prog_blur, gl3_prog_blend;
+static GLint			gl3_extract_loc[4];		// texture0, threshold, mode, modulate
+static GLint			gl3_blur_loc[3];		// texture0, x, y
+static GLint			gl3_blend_loc[5];		// texture0..3, factor
+
+// --- M5: flares ------------------------------------------------------------
+#define GL3_MAX_FLARES		64
+typedef struct {
+	qboolean	used;
+	qboolean	visible;
+	qboolean	queryPending;
+	int			fadeTime;
+	int			addedFrame;
+	int			frameSceneNum;
+	int			portalView;
+	void		*surface;
+	int			fogNum;
+	float		windowX, windowY;
+	float		eyeZ, drawZ;
+	float		drawIntensity;
+	vec3_t		origin;
+	vec3_t		color;
+	GLuint		query;
+} gl3_flare_t;
+
+static gl3_flare_t		gl3_flares[GL3_MAX_FLARES];
+static GLuint			gl3_flare_vbo;
+static GLint			gl3_flare_mvp_loc = -1;
+static GLuint			gl3_flare_prog;
+
+// --- M5: lighting ----------------------------------------------------------
+static qboolean			gl3_lighting;
+static int				gl3_lighting_bundle;
+
+// --- M5: program binary cache ---------------------------------------------
+#define GL3_PROG_CACHE_MAGIC	0x33454C47u	// "GLE3"
+#define GL3_PROG_CACHE_VERSION	1
+typedef struct {
+	uint32_t	key;			// hash of (shader_type, fog_stage)
+	int			shader_type;
+	int			fog_stage;
+	GLenum		format;
+	int			length;
+	byte		*binary;
+} gl3_cache_entry_t;
+
+#define GL3_MAX_CACHE_ENTRIES 128
+static gl3_cache_entry_t	gl3_cache_storage[GL3_MAX_CACHE_ENTRIES];
+static gl3_cache_entry_t	*gl3_cache_entries = gl3_cache_storage;
+static int					gl3_cache_count;
+static qboolean				gl3_cache_loaded;
+static qboolean				gl3_cache_dirty;
+static qboolean				gl3_binary_supported;
+static uint32_t				gl3_cache_stamp;
+
 // The three device-loss entry points are the module surface the client resolves
 // with dlsym. For GLES the "device lost" condition is a lost GL context, which
 // the error sweep below recognises (GL_CONTEXT_LOST). When it happens the flag
@@ -307,6 +375,244 @@ static void GL3_SelfTest_f( void )
 	GL3_CHECK( "selftest" );
 	ri.Printf( PRINT_ALL, "GLES3 selftest: ---------- ends ----------\n" );
 }
+
+static void GL3_DrawFullscreenQuad( void )
+{
+	qglBindVertexArray( gl3_gamma_vao );
+	qglDrawArrays( GL_TRIANGLE_STRIP, 0, 4 );
+	qglBindVertexArray( gl3_vao );
+}
+
+// ---------------------------------------------------------------------------
+// Program binary cache (M5)
+//
+// ES 3.0 exposes glGetProgramBinary/glProgramBinary in core; GL_NUM_PROGRAM_
+// BINARY_FORMATS tells whether a driver offers any formats (0 -> compile from
+// source every run). The cache is one file under fs_homepath, stamped with a
+// hash of vendor/renderer/version/ES version and the uniform block size, so a
+// driver update or a shader change invalidates it instead of feeding the driver
+// an incompatible blob. Any load failure falls back to source compilation.
+// ---------------------------------------------------------------------------
+
+static uint32_t GL3_HashString( uint32_t h, const char *s )
+{
+	while ( s && *s ) {
+		h ^= (byte)*s++;
+		h *= 16777619u;
+	}
+	return h;
+}
+
+static uint32_t GL3_ProgramKey( int shader_type, int fog_stage )
+{
+	uint32_t h = 2166136261u;
+	h = GL3_HashString( h, va( "%d/%d/%d/%d", shader_type, fog_stage, gl3_samples, (int)sizeof( vkUniform_t ) ) );
+	return h;
+}
+
+static void GL3_CacheReset( void )
+{
+	int i;
+
+	for ( i = 0; i < gl3_cache_count; i++ )
+		if ( gl3_cache_entries[i].binary )
+			ri.Free( gl3_cache_entries[i].binary );
+	gl3_cache_count = 0;
+}
+
+static gl3_cache_entry_t *GL3_CacheFind( uint32_t key )
+{
+	int i;
+
+	for ( i = 0; i < gl3_cache_count; i++ )
+		if ( gl3_cache_entries[i].key == key )
+			return &gl3_cache_entries[i];
+	return NULL;
+}
+
+static void GL3_CacheAdd( uint32_t key, int shader_type, int fog_stage, GLenum format, int length, const void *data )
+{
+	gl3_cache_entry_t *e;
+
+	if ( length <= 0 || !data || gl3_cache_count >= GL3_MAX_CACHE_ENTRIES )
+		return;
+
+	e = &gl3_cache_entries[gl3_cache_count++];
+	e->key = key;
+	e->shader_type = shader_type;
+	e->fog_stage = fog_stage;
+	e->format = format;
+	e->length = length;
+	e->binary = (byte *)ri.Malloc( length );
+	Com_Memcpy( e->binary, data, length );
+	gl3_cache_dirty = qtrue;
+}
+
+static void GL3_ComputeCacheStamp( void )
+{
+	uint32_t h = 2166136261u;
+
+	h = GL3_HashString( h, qglGetString ? (const char *)qglGetString( GL_VENDOR ) : "" );
+	h = GL3_HashString( h, qglGetString ? (const char *)qglGetString( GL_RENDERER ) : "" );
+	h = GL3_HashString( h, qglGetString ? (const char *)qglGetString( GL_VERSION ) : "" );
+	h = GL3_HashString( h, va( "%d.%d/%d/%d", qglesMajorVersion, qglesMinorVersion,
+		(int)sizeof( vkUniform_t ), gl3_samples ) );
+	gl3_cache_stamp = h;
+}
+
+static void GL3_CacheLoad( void )
+{
+	char path[MAX_OSPATH];
+	const char *home;
+	FILE *f;
+	uint32_t magic, version, stamp, ubo;
+	int i, count;
+
+	gl3_cache_loaded = qtrue;
+	gl3_cache_count = 0;
+	GL3_ComputeCacheStamp();
+
+	{
+		GLint formats = 0;
+		qglGetIntegerv( GL_NUM_PROGRAM_BINARY_FORMATS, &formats );
+		gl3_binary_supported = formats > 0;
+	}
+	if ( !gl3_binary_supported )
+		return;
+
+	home = ri.Cvar_VariableString( "fs_homepath" );
+	if ( !home || !home[0] )
+		return;
+
+	Com_sprintf( path, sizeof( path ), "%s/gl3_programs.bin", home );
+	f = fopen( path, "rb" );
+	if ( !f )
+		return;
+
+	if ( fread( &magic, sizeof( magic ), 1, f ) != 1 || magic != GL3_PROG_CACHE_MAGIC ||
+	     fread( &version, sizeof( version ), 1, f ) != 1 || version != GL3_PROG_CACHE_VERSION ||
+	     fread( &stamp, sizeof( stamp ), 1, f ) != 1 || stamp != gl3_cache_stamp ||
+	     fread( &ubo, sizeof( ubo ), 1, f ) != 1 || ubo != (uint32_t)sizeof( vkUniform_t ) ||
+	     fread( &count, sizeof( count ), 1, f ) != 1 || count < 0 || count > GL3_MAX_CACHE_ENTRIES ) {
+		fclose( f );
+		ri.Printf( PRINT_ALL, "GLES3: program cache ignored (stamp/format mismatch)\n" );
+		return;
+	}
+
+	for ( i = 0; i < count; i++ ) {
+		gl3_cache_entry_t e;
+		Com_Memset( &e, 0, sizeof( e ) );
+		if ( fread( &e.key, sizeof( e.key ), 1, f ) != 1 ||
+		     fread( &e.shader_type, sizeof( e.shader_type ), 1, f ) != 1 ||
+		     fread( &e.fog_stage, sizeof( e.fog_stage ), 1, f ) != 1 ||
+		     fread( &e.format, sizeof( e.format ), 1, f ) != 1 ||
+		     fread( &e.length, sizeof( e.length ), 1, f ) != 1 ||
+		     e.length <= 0 || e.length > ( 4 << 20 ) )
+			break;
+		e.binary = (byte *)ri.Malloc( e.length );
+		if ( fread( e.binary, 1, e.length, f ) != (size_t)e.length ) {
+			ri.Free( e.binary );
+			break;
+		}
+		gl3_cache_entries[gl3_cache_count++] = e;
+	}
+	fclose( f );
+	ri.Printf( PRINT_ALL, "GLES3: program cache loaded (%d entries) from %s\n", gl3_cache_count, path );
+}
+
+static void GL3_CacheSave( void )
+{
+	char path[MAX_OSPATH], tmp[MAX_OSPATH];
+	const char *home;
+	FILE *f;
+	uint32_t magic = GL3_PROG_CACHE_MAGIC, version = GL3_PROG_CACHE_VERSION;
+	uint32_t stamp = gl3_cache_stamp, ubo = (uint32_t)sizeof( vkUniform_t );
+	int i, count = gl3_cache_count;
+
+	if ( !gl3_binary_supported || !gl3_cache_dirty )
+		return;
+
+	home = ri.Cvar_VariableString( "fs_homepath" );
+	if ( !home || !home[0] )
+		return;
+
+	Com_sprintf( path, sizeof( path ), "%s/gl3_programs.bin", home );
+	Com_sprintf( tmp, sizeof( tmp ), "%s.tmp", path );
+
+	f = fopen( tmp, "wb" );
+	if ( !f )
+		return;
+
+	if ( fwrite( &magic, sizeof( magic ), 1, f ) != 1 ||
+	     fwrite( &version, sizeof( version ), 1, f ) != 1 ||
+	     fwrite( &stamp, sizeof( stamp ), 1, f ) != 1 ||
+	     fwrite( &ubo, sizeof( ubo ), 1, f ) != 1 ||
+	     fwrite( &count, sizeof( count ), 1, f ) != 1 ) {
+		fclose( f );
+		remove( tmp );
+		return;
+	}
+
+	for ( i = 0; i < count; i++ ) {
+		gl3_cache_entry_t *e = &gl3_cache_entries[i];
+		if ( fwrite( &e->key, sizeof( e->key ), 1, f ) != 1 ||
+		     fwrite( &e->shader_type, sizeof( e->shader_type ), 1, f ) != 1 ||
+		     fwrite( &e->fog_stage, sizeof( e->fog_stage ), 1, f ) != 1 ||
+		     fwrite( &e->format, sizeof( e->format ), 1, f ) != 1 ||
+		     fwrite( &e->length, sizeof( e->length ), 1, f ) != 1 ||
+		     fwrite( e->binary, 1, e->length, f ) != (size_t)e->length ) {
+			fclose( f );
+			remove( tmp );
+			return;
+		}
+	}
+	fclose( f );
+
+	remove( path );
+	if ( rename( tmp, path ) != 0 )
+		remove( tmp );
+	else
+		gl3_cache_dirty = qfalse;
+}
+
+static void GL3_CacheStore( const gl3_program_t *prog )
+{
+	byte buf[65536];
+	GLsizei length = 0;
+	GLenum format = 0;
+	uint32_t key;
+
+	if ( !gl3_binary_supported || !prog || !prog->program )
+		return;
+
+	qglGetProgramBinary( prog->program, sizeof( buf ), &length, &format, buf );
+	if ( length <= 0 || length > (GLsizei)sizeof( buf ) )
+		return;
+
+	key = GL3_ProgramKey( prog->shader_type, prog->fog_stage );
+	GL3_CacheAdd( key, prog->shader_type, prog->fog_stage, format, length, buf );
+}
+
+static GLuint GL3_ProgramFromCache( uint32_t key )
+{
+	gl3_cache_entry_t *e = GL3_CacheFind( key );
+	GLuint program;
+	GLint status = 0;
+
+	if ( !e )
+		return 0;
+
+	program = qglCreateProgram();
+	qglProgramBinary( program, e->format, e->binary, e->length );
+	qglGetProgramiv( program, GL_LINK_STATUS, &status );
+	if ( !status ) {
+		qglDeleteProgram( program );
+		return 0;
+	}
+
+	return program;
+}
+
 
 static GLuint GL3_TextureFromDescriptor( VkDescriptorSet descriptor )
 {
@@ -701,7 +1007,12 @@ static gl3_program_t *GL3_GetProgram( const Vk_Pipeline_Def *def )
 	if ( info.df ) Q_strcat( defines, sizeof( defines ), "#define USE_DF\n" );
 	if ( info.linear ) Q_strcat( defines, sizeof( defines ), "#define USE_LINE\n" );
 
-	program = GL3_LinkProgram( info.vs, info.fs, defines );
+	{
+		uint32_t key = GL3_ProgramKey( (int)def->shader_type, fog_stage );
+		program = GL3_ProgramFromCache( key );
+	}
+	if ( !program )
+		program = GL3_LinkProgram( info.vs, info.fs, defines );
 	if ( !program ) {
 		ri.Printf( PRINT_WARNING, "GLES3: could not build program for shader type %i\n", def->shader_type );
 		return NULL;
@@ -749,6 +1060,8 @@ static gl3_program_t *GL3_GetProgram( const Vk_Pipeline_Def *def )
 	if ( prog->loc_identity_color >= 0 ) qglUniform1f( prog->loc_identity_color, 1.0f );
 	if ( prog->loc_identity_alpha >= 0 ) qglUniform1f( prog->loc_identity_alpha, 1.0f );
 	if ( prog->loc_acff >= 0 ) qglUniform1i( prog->loc_acff, 0 );
+
+	GL3_CacheStore( prog );
 
 	return prog;
 }
@@ -1020,6 +1333,73 @@ static void GL3_DestroyTarget( GLuint *fbo, GLuint *color, GLuint *depth )
 	if ( *depth ) { qglDeleteRenderbuffers( 1, depth ); *depth = 0; }
 }
 
+// MSAA selection. The Android port documents that low-end Mali/PowerVR parts
+// can lose the device under multisampled rendering, and its Vulkan path gates
+// MSAA off on those families; the same caution is applied here. Anything else
+// honours r_ext_multisample (capped by GL_MAX_SAMPLES).
+static int GL3_ChooseSamples( void )
+{
+	const char *renderer = qglGetString ? (const char *)qglGetString( GL_RENDERER ) : "";
+	GLint maxSamples = 1;
+	int requested = r_ext_multisample ? r_ext_multisample->integer : 1;
+
+	if ( requested < 2 )
+		return 1;
+
+	if ( renderer && ( Q_stristr( renderer, "Mali" ) || Q_stristr( renderer, "PowerVR" ) ) ) {
+		ri.Printf( PRINT_ALL, "GLES3: MSAA disabled on %s (documented Mali/PowerVR device-loss caution)\n", renderer );
+		return 1;
+	}
+
+	qglGetIntegerv( GL_MAX_SAMPLES, &maxSamples );
+	if ( maxSamples < 2 )
+		return 1;
+	if ( requested > maxSamples )
+		requested = maxSamples;
+
+	return requested;
+}
+
+static void GL3_CreateMSAA( void )
+{
+	if ( gl3_samples < 2 )
+		return;
+
+	qglGenRenderbuffers( 1, &gl3_msaa_color );
+	qglBindRenderbuffer( GL_RENDERBUFFER, gl3_msaa_color );
+	qglRenderbufferStorageMultisample( GL_RENDERBUFFER, gl3_samples, GL_RGBA8, gl3_width, gl3_height );
+
+	// The depth/stencil attachment must be multisampled too: rendering into a
+	// single-sample depth buffer inside the multisampled framebuffer is not a
+	// legal combination.
+	qglGenRenderbuffers( 1, &gl3_msaa_depth );
+	qglBindRenderbuffer( GL_RENDERBUFFER, gl3_msaa_depth );
+	qglRenderbufferStorageMultisample( GL_RENDERBUFFER, gl3_samples, GL_DEPTH24_STENCIL8, gl3_width, gl3_height );
+
+	qglGenFramebuffers( 1, &gl3_msaa_fbo );
+	qglBindFramebuffer( GL_FRAMEBUFFER, gl3_msaa_fbo );
+	qglFramebufferRenderbuffer( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, gl3_msaa_color );
+	qglFramebufferRenderbuffer( GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, gl3_msaa_depth );
+	if ( qglCheckFramebufferStatus( GL_FRAMEBUFFER ) != GL_FRAMEBUFFER_COMPLETE ) {
+		ri.Printf( PRINT_WARNING, "GLES3: multisampled framebuffer incomplete; falling back to 1 sample\n" );
+		qglBindFramebuffer( GL_FRAMEBUFFER, 0 );
+		qglDeleteFramebuffers( 1, &gl3_msaa_fbo ); gl3_msaa_fbo = 0;
+		qglDeleteRenderbuffers( 1, &gl3_msaa_color ); gl3_msaa_color = 0;
+		qglDeleteRenderbuffers( 1, &gl3_msaa_depth ); gl3_msaa_depth = 0;
+		gl3_samples = 1;
+		return;
+	}
+	qglBindFramebuffer( GL_FRAMEBUFFER, 0 );
+	qglBindRenderbuffer( GL_RENDERBUFFER, 0 );
+}
+
+static void GL3_DestroyMSAA( void )
+{
+	if ( gl3_msaa_fbo ) { qglDeleteFramebuffers( 1, &gl3_msaa_fbo ); gl3_msaa_fbo = 0; }
+	if ( gl3_msaa_color ) { qglDeleteRenderbuffers( 1, &gl3_msaa_color ); gl3_msaa_color = 0; }
+	if ( gl3_msaa_depth ) { qglDeleteRenderbuffers( 1, &gl3_msaa_depth ); gl3_msaa_depth = 0; }
+}
+
 static void GL3_CreateTargets( void )
 {
 	if ( gl3_main_fbo )
@@ -1032,6 +1412,161 @@ static void GL3_CreateTargets( void )
 	// descriptor, the same convention as an image_t.
 	vk.screenMap.color_descriptor = GL3_DescriptorFromTexture( gl3_screenmap_color );
 	vk.screenMap.color_image_view = (VkImageView)(uintptr_t)gl3_screenmap_color;
+}
+
+// ---------------------------------------------------------------------------
+// Bloom (M4)
+//
+// Same chain and constants as the Vulkan backend: extract the bright pixels at
+// capture resolution through bloom.frag (r_bloom_threshold, threshold mode,
+// modulate), four progressively halved gaussian blur pairs through blur.frag
+// (texoffset = 1.2 / size, 6/5 weighted 3-tap), then additive-blend the four
+// vertical results into the resolved scene through blend.frag with
+// r_bloom_intensity as the factor. Runs after the MSAA resolve and before the
+// gamma composite, which is the Vulkan pass order.
+// ---------------------------------------------------------------------------
+
+static void GL3_BloomTexture( GLuint *tex, int w, int h )
+{
+	qglGenTextures( 1, tex );
+	qglBindTexture( GL_TEXTURE_2D, *tex );
+	qglTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL );
+	qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR );
+	qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
+	qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
+	qglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
+	qglBindTexture( GL_TEXTURE_2D, 0 );
+}
+
+static qboolean GL3_EnsureBloom( void )
+{
+	int i, w, h;
+
+	if ( !r_bloom->integer )
+		return qfalse;
+
+	if ( gl3_bloom_tex[0] )
+		return qtrue;
+
+	GL3_BloomTexture( &gl3_bloom_tex[0], gl3_width, gl3_height );
+	gl3_bloom_w[0] = gl3_width;
+	gl3_bloom_h[0] = gl3_height;
+
+	w = gl3_width;
+	h = gl3_height;
+	for ( i = 0; i < GL3_BLOOM_LEVELS; i++ ) {
+		w = w > 1 ? w / 2 : 1;
+		h = h > 1 ? h / 2 : 1;
+		GL3_BloomTexture( &gl3_bloom_tex[1 + i * 2], w, h );	// horizontal
+		GL3_BloomTexture( &gl3_bloom_tex[2 + i * 2], w, h );	// vertical
+		gl3_bloom_w[1 + i * 2] = w;
+		gl3_bloom_h[1 + i * 2] = h;
+		gl3_bloom_w[2 + i * 2] = w;
+		gl3_bloom_h[2 + i * 2] = h;
+	}
+
+	qglGenFramebuffers( 1, &gl3_bloom_fbo );
+
+	if ( !gl3_prog_extract ) {
+		gl3_prog_extract = GL3_LinkProgram( "gamma.vert", "bloom.frag", NULL );
+		gl3_prog_blur = GL3_LinkProgram( "gamma.vert", "blur.frag", NULL );
+		gl3_prog_blend = GL3_LinkProgram( "gamma.vert", "blend.frag", NULL );
+		if ( !gl3_prog_extract || !gl3_prog_blur || !gl3_prog_blend ) {
+			ri.Printf( PRINT_WARNING, "GLES3: bloom program build failed; bloom disabled\n" );
+			return qfalse;
+		}
+		gl3_extract_loc[0] = qglGetUniformLocation( gl3_prog_extract, "texture0" );
+		gl3_extract_loc[1] = qglGetUniformLocation( gl3_prog_extract, "threshold" );
+		gl3_extract_loc[2] = qglGetUniformLocation( gl3_prog_extract, "extract_mode" );
+		gl3_extract_loc[3] = qglGetUniformLocation( gl3_prog_extract, "base_modulate" );
+		gl3_blur_loc[0] = qglGetUniformLocation( gl3_prog_blur, "texture0" );
+		gl3_blur_loc[1] = qglGetUniformLocation( gl3_prog_blur, "texoffset_x" );
+		gl3_blur_loc[2] = qglGetUniformLocation( gl3_prog_blur, "texoffset_y" );
+		gl3_blend_loc[0] = qglGetUniformLocation( gl3_prog_blend, "texture0" );
+		gl3_blend_loc[1] = qglGetUniformLocation( gl3_prog_blend, "texture1" );
+		gl3_blend_loc[2] = qglGetUniformLocation( gl3_prog_blend, "texture2" );
+		gl3_blend_loc[3] = qglGetUniformLocation( gl3_prog_blend, "texture3" );
+		gl3_blend_loc[4] = qglGetUniformLocation( gl3_prog_blend, "factor" );
+	}
+
+	return qtrue;
+}
+
+static void GL3_BloomDraw( GLuint target, int w, int h, GLuint source )
+{
+	qglBindFramebuffer( GL_FRAMEBUFFER, gl3_bloom_fbo );
+	qglFramebufferTexture2D( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target, 0 );
+	qglViewport( 0, 0, w, h );
+	qglDisable( GL_SCISSOR_TEST );
+	qglDisable( GL_DEPTH_TEST );
+	qglDisable( GL_BLEND );
+	qglActiveTexture( GL_TEXTURE0 );
+	qglBindTexture( GL_TEXTURE_2D, source );
+	GL3_DrawFullscreenQuad();
+}
+
+static void GL3_RunBloom( void )
+{
+	int i;
+
+	if ( !gl3_bloom_pending )
+		return;
+	gl3_bloom_pending = qfalse;
+
+	if ( !GL3_EnsureBloom() )
+		return;
+
+	// Extraction.
+	qglUseProgram( gl3_prog_extract );
+	if ( gl3_extract_loc[0] >= 0 ) qglUniform1i( gl3_extract_loc[0], 0 );
+	if ( gl3_extract_loc[1] >= 0 ) qglUniform1f( gl3_extract_loc[1], r_bloom_threshold->value );
+	if ( gl3_extract_loc[2] >= 0 ) qglUniform1i( gl3_extract_loc[2], r_bloom_threshold_mode->integer );
+	if ( gl3_extract_loc[3] >= 0 ) qglUniform1i( gl3_extract_loc[3], r_bloom_modulate->integer );
+	GL3_BloomDraw( gl3_bloom_tex[0], gl3_width, gl3_height, gl3_main_color );
+
+	// Blur pairs; each level samples the previous level's vertical result.
+	qglUseProgram( gl3_prog_blur );
+	if ( gl3_blur_loc[0] >= 0 ) qglUniform1i( gl3_blur_loc[0], 0 );
+	for ( i = 0; i < GL3_BLOOM_LEVELS; i++ ) {
+		GLuint src = ( i == 0 ) ? gl3_bloom_tex[0] : gl3_bloom_tex[2 + ( i - 1 ) * 2];
+
+		if ( gl3_blur_loc[1] >= 0 ) qglUniform1f( gl3_blur_loc[1], 1.2f / (float)gl3_bloom_w[1 + i * 2] );
+		if ( gl3_blur_loc[2] >= 0 ) qglUniform1f( gl3_blur_loc[2], 0.0f );
+		GL3_BloomDraw( gl3_bloom_tex[1 + i * 2], gl3_bloom_w[1 + i * 2], gl3_bloom_h[1 + i * 2], src );
+
+		if ( gl3_blur_loc[1] >= 0 ) qglUniform1f( gl3_blur_loc[1], 0.0f );
+		if ( gl3_blur_loc[2] >= 0 ) qglUniform1f( gl3_blur_loc[2], 1.2f / (float)gl3_bloom_h[2 + i * 2] );
+		GL3_BloomDraw( gl3_bloom_tex[2 + i * 2], gl3_bloom_w[2 + i * 2], gl3_bloom_h[2 + i * 2], gl3_bloom_tex[1 + i * 2] );
+	}
+
+	// Additive composite into the resolved scene.
+	qglBindFramebuffer( GL_FRAMEBUFFER, gl3_main_fbo );
+	qglViewport( 0, 0, gl3_width, gl3_height );
+	qglUseProgram( gl3_prog_blend );
+	for ( i = 0; i < 4; i++ ) {
+		qglActiveTexture( GL_TEXTURE0 + i );
+		qglBindTexture( GL_TEXTURE_2D, gl3_bloom_tex[2 + i * 2] );
+		if ( gl3_blend_loc[i] >= 0 ) qglUniform1i( gl3_blend_loc[i], i );
+	}
+	if ( gl3_blend_loc[4] >= 0 ) qglUniform1f( gl3_blend_loc[4], r_bloom_intensity->value );
+	qglEnable( GL_BLEND );
+	qglBlendFunc( GL_ONE, GL_ONE );
+	GL3_DrawFullscreenQuad();
+	qglDisable( GL_BLEND );
+	qglUseProgram( 0 );
+}
+
+static void GL3_DestroyBloom( void )
+{
+	int i;
+
+	for ( i = 0; i < 1 + GL3_BLOOM_LEVELS * 2; i++ ) {
+		if ( gl3_bloom_tex[i] ) { qglDeleteTextures( 1, &gl3_bloom_tex[i] ); gl3_bloom_tex[i] = 0; }
+	}
+	if ( gl3_bloom_fbo ) { qglDeleteFramebuffers( 1, &gl3_bloom_fbo ); gl3_bloom_fbo = 0; }
+	if ( gl3_prog_extract ) { qglDeleteProgram( gl3_prog_extract ); gl3_prog_extract = 0; }
+	if ( gl3_prog_blur ) { qglDeleteProgram( gl3_prog_blur ); gl3_prog_blur = 0; }
+	if ( gl3_prog_blend ) { qglDeleteProgram( gl3_prog_blend ); gl3_prog_blend = 0; }
 }
 
 static void GL3_CreateGammaProgram( void )
@@ -1119,12 +1654,6 @@ void vk_initialize( void )
 	// unit shader combinations; the 3-stage "mtEnv3" combinations need the
 	// 8-descriptor paths this backend does not implement.
 	vk.maxBoundDescriptorSets = 0;
-	if ( r_dlightMode->integer != 0 ) {
-		ri.Printf( PRINT_ALL, "GLES3: r_dlightMode %i needs the per-pixel light pass; using the classic multipass path\n",
-			r_dlightMode->integer );
-		ri.Cvar_Set( "r_dlightMode", "0" );
-	}
-
 	if ( r_smp->integer ) {
 		// Documented decision: this backend is single-threaded. GLES contexts
 		// are thread-affine and neither VAOs nor FBOs are shared between
@@ -1156,12 +1685,20 @@ void vk_initialize( void )
 	qglGenVertexArrays( 1, &gl3_vao );
 	qglBindVertexArray( gl3_vao );
 	qglGenVertexArrays( 1, &gl3_gamma_vao );	// attribute-less: gamma.vert uses gl_VertexID
+	qglGenBuffers( 1, &gl3_flare_vbo );
+	{
+		int i;
+		for ( i = 0; i < GL3_MAX_FLARES; i++ )
+			qglGenQueries( 1, &gl3_flares[i].query );
+	}
 	qglGenBuffers( 1, &gl3_vbo );
 	qglGenBuffers( 1, &gl3_ibo );
 	qglGenBuffers( 1, &gl3_ubo );
 	qglBindVertexArray( 0 );
 
 	GL3_CreateTargets();
+	gl3_samples = GL3_ChooseSamples();
+	GL3_CreateMSAA();
 	GL3_CHECK( "create targets" );
 	GL3_CreateGammaProgram();
 	GL3_CHECK( "gamma program" );
@@ -1178,6 +1715,8 @@ void vk_initialize( void )
 
 	GL3_DefaultMVP( gl3_mvp_default );
 	Com_Memcpy( gl3_mvp, gl3_mvp_default, sizeof( gl3_mvp ) );
+
+	GL3_CacheLoad();
 
 	gl3_initialized = qtrue;
 	gl3_backend_ok = qtrue;
@@ -1216,6 +1755,8 @@ void vk_shutdown( refShutdownCode_t code )
 
 	GL3_DestroyTarget( &gl3_main_fbo, &gl3_main_color, &gl3_main_depth );
 	GL3_DestroyTarget( &gl3_screenmap_fbo, &gl3_screenmap_color, &gl3_screenmap_depth );
+	GL3_DestroyMSAA();
+	GL3_DestroyBloom();
 
 	if ( gl3_gamma_program ) { qglDeleteProgram( gl3_gamma_program ); gl3_gamma_program = 0; }
 	if ( gl3_vao ) { qglDeleteVertexArrays( 1, &gl3_vao ); gl3_vao = 0; }
@@ -1237,6 +1778,9 @@ void vk_shutdown( refShutdownCode_t code )
 	// context: the engine intentionally does not recreate them, and the next
 	// vk_initialize() only re-syncs r_mode/r_fullscreen (GL3_PlatformResync).
 	// Only a real unload tears the platform down.
+	GL3_CacheSave();
+	GL3_CacheReset();
+
 	if ( code == REF_UNLOAD_DLL )
 		GL3_PlatformShutdown( qtrue );
 }
@@ -1434,9 +1978,22 @@ void vk_get_pipeline_def( uint32_t pipeline, Vk_Pipeline_Def *def )
 
 void vk_prewarm_pipelines( void )
 {
-	// Compilation is per draw (first use), not upfront: creating every program
-	// permutation the map might need is the pipeline-prewarm analogue and is
-	// worth doing once the backend is verified.
+	uint32_t i;
+	int before = gl3_program_count;
+	int t0 = ri.Milliseconds();
+
+	// The Vulkan backend creates every pipeline def here, behind the loading
+	// screen. This backend's equivalent is compiling every program permutation
+	// the registered shaders reference, so a map load never compiles on the
+	// critical path, then persisting them for the next run.
+	for ( i = 0; i < vk.pipelines_count; i++ )
+		GL3_GetProgram( &vk.pipelines[i].def );
+
+	if ( gl3_program_count != before ) {
+		ri.Printf( PRINT_ALL, "GLES3: prewarmed %d programs (%d total) in %i msec\n",
+			gl3_program_count - before, gl3_program_count, ri.Milliseconds() - t0 );
+	}
+	GL3_CacheSave();
 }
 
 void vk_save_pipeline_cache( void )
@@ -1454,6 +2011,59 @@ void vk_update_post_process_pipelines( void )
 
 void vk_create_pipelines( void )
 {
+	Vk_Pipeline_Def def;
+	unsigned int fog_state_bits[2] = {
+		GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA | GLS_DEPTHFUNC_EQUAL,
+		GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA
+	};
+	unsigned int dlight_state_bits[2] = {
+		GLS_SRCBLEND_DST_COLOR | GLS_DSTBLEND_ONE | GLS_DEPTHFUNC_EQUAL,
+		GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE | GLS_DEPTHFUNC_EQUAL
+	};
+	qboolean polygon_offset[2] = { qfalse, qtrue };
+	int i, j, k;
+
+	Com_Memset( &def, 0, sizeof( def ) );
+	def.shader_type = TYPE_SIGNLE_TEXTURE;
+	def.mirror = qfalse;
+
+	for ( i = 0; i < 2; i++ ) {
+		for ( j = 0; j < 3; j++ ) {
+			def.face_culling = (cullType_t)j;
+			for ( k = 0; k < 2; k++ ) {
+				def.polygon_offset = polygon_offset[k];
+
+				def.shader_type = TYPE_FOG_ONLY;
+				def.state_bits = fog_state_bits[i];
+				vk.fog_pipelines[i][j][k] = vk_find_pipeline_ext( 0, &def, qfalse );
+
+				def.shader_type = TYPE_SIGNLE_TEXTURE;
+				def.state_bits = dlight_state_bits[i];
+				vk.dlight_pipelines[i][j][k] = vk_find_pipeline_ext( 0, &def, qfalse );
+			}
+		}
+	}
+
+	// Per-pixel lighting (r_dlightMode 1|2): same defs the Vulkan backend
+	// creates, so the lighting pass is reachable rather than dead code.
+	def.state_bits = GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE | GLS_DEPTHFUNC_EQUAL;
+	for ( i = 0; i < 3; i++ ) {
+		def.face_culling = (cullType_t)i;
+		for ( j = 0; j < 2; j++ ) {
+			def.polygon_offset = polygon_offset[j];
+			for ( k = 0; k < 2; k++ ) {
+				int l;
+				def.fog_stage = k;
+				for ( l = 0; l < 2; l++ ) {
+					def.abs_light = l;
+					def.shader_type = TYPE_SIGNLE_TEXTURE_LIGHTING;
+					vk.dlight_pipelines_x[i][j][k][l] = vk_find_pipeline_ext( 0, &def, qfalse );
+					def.shader_type = TYPE_SIGNLE_TEXTURE_LIGHTING_LINEAR;
+					vk.dlight1_pipelines_x[i][j][k][l] = vk_find_pipeline_ext( 0, &def, qfalse );
+				}
+			}
+		}
+	}
 }
 
 void vk_clear_color( const vec4_t color )
@@ -1518,6 +2128,9 @@ static qboolean GL3_FindScreenmapDrawsurfs( void )
 
 static void GL3_BeginTarget( GLuint fbo, qboolean clear )
 {
+	if ( fbo == gl3_main_fbo && gl3_samples > 1 && gl3_msaa_fbo )
+		fbo = gl3_msaa_fbo;
+
 	qglBindFramebuffer( GL_FRAMEBUFFER, fbo );
 	qglViewport( 0, 0, gl3_width, gl3_height );
 	qglScissor( 0, 0, gl3_width, gl3_height );
@@ -1596,7 +2209,19 @@ void vk_end_frame( void )
 		return;
 	vk.frame_count = 0;
 
-	qglBindFramebuffer( GL_FRAMEBUFFER, 0 );
+	if ( gl3_samples > 1 && gl3_msaa_fbo ) {
+		// Resolve the multisampled colour into the single-sample target that the
+		// gamma composite and the capture paths read.
+		qglBindFramebuffer( GL_READ_FRAMEBUFFER, gl3_msaa_fbo );
+		qglBindFramebuffer( GL_DRAW_FRAMEBUFFER, gl3_main_fbo );
+		qglBlitFramebuffer( 0, 0, gl3_width, gl3_height, 0, 0, gl3_width, gl3_height,
+			GL_COLOR_BUFFER_BIT, GL_NEAREST );
+	}
+	qglBindFramebuffer( GL_FRAMEBUFFER, gl3_main_fbo );
+
+	GL3_RunBloom();
+
+	qglBindFramebuffer( GL_FRAMEBUFFER, gl3_main_fbo );
 	gl3_frame_active = qfalse;
 }
 
@@ -1747,9 +2372,44 @@ void vk_bind_geometry( uint32_t flags )
 
 // Attribute layout mirrors the Vulkan input state: loc0 xyz, loc1 colour0,
 // loc2 st0, loc3 st1, loc4 st2, loc5 normal, loc6 colour1, loc7 colour2.
+// The lighting program's input layout differs from the generic one: loc0 xyz,
+// loc1 texcoords (of the lighting bundle), loc2 normal. The front end calls
+// vk_bind_lighting() between vk_bind_index() and vk_draw_geometry(), so the
+// bundle is recorded here and the attributes are uploaded in the draw.
 void vk_bind_lighting( int stage, int bundle )
 {
-	(void)stage; (void)bundle;
+	(void)stage;
+	gl3_lighting = qtrue;
+	gl3_lighting_bundle = bundle;
+}
+
+static void GL3_BindLightingGeometry( int bundle )
+{
+	int count = tess.numVertexes;
+	uint32_t total = 0, offset = 0;
+
+	if ( count <= 0 || bundle < 0 || bundle >= 2 || !tess.svars.texcoordPtr[bundle] )
+		return;
+
+	total = (uint32_t)count * ( sizeof( vec4_t ) + sizeof( vec2_t ) + sizeof( vec4_t ) );
+
+	qglBindVertexArray( gl3_vao );
+	qglBindBuffer( GL_ARRAY_BUFFER, gl3_vbo );
+	qglBufferData( GL_ARRAY_BUFFER, (GLsizeiptr)total, NULL, GL_STREAM_DRAW );
+
+	qglBufferSubData( GL_ARRAY_BUFFER, (GLintptr)offset, (GLsizeiptr)( count * sizeof( vec4_t ) ), &tess.xyz[0] );
+	qglEnableVertexAttribArray( 0 );
+	qglVertexAttribPointer( 0, 4, GL_FLOAT, GL_FALSE, sizeof( vec4_t ), (const void *)(uintptr_t)offset );
+	offset = (uint32_t)PAD( offset + count * sizeof( vec4_t ), 4 );
+
+	qglBufferSubData( GL_ARRAY_BUFFER, (GLintptr)offset, (GLsizeiptr)( count * sizeof( vec2_t ) ), tess.svars.texcoordPtr[bundle] );
+	qglEnableVertexAttribArray( 1 );
+	qglVertexAttribPointer( 1, 2, GL_FLOAT, GL_FALSE, sizeof( vec2_t ), (const void *)(uintptr_t)offset );
+	offset = (uint32_t)PAD( offset + count * sizeof( vec2_t ), 4 );
+
+	qglBufferSubData( GL_ARRAY_BUFFER, (GLintptr)offset, (GLsizeiptr)( count * sizeof( vec4_t ) ), &tess.normal[0] );
+	qglEnableVertexAttribArray( 2 );
+	qglVertexAttribPointer( 2, 4, GL_FLOAT, GL_FALSE, sizeof( vec4_t ), (const void *)(uintptr_t)offset );
 }
 
 // Tessellation flags -> vertex attribute set. The front end emits exactly the
@@ -1954,7 +2614,12 @@ void vk_draw_geometry( Vk_Depth_Range depth_range, qboolean indexed )
 		// provides via the normal tessellation path for lit surfaces.
 	}
 
-	GL3_BindTessellation();
+	if ( gl3_lighting ) {
+		GL3_BindLightingGeometry( gl3_lighting_bundle );
+		gl3_lighting = qfalse;
+	} else {
+		GL3_BindTessellation();
+	}
 
 	if ( indexed ) {
 		if ( gl3_cmd.num_indexes > 0 )
@@ -1971,21 +2636,59 @@ void vk_draw_dot( uint32_t storage_offset )
 
 void vk_read_pixels( byte *buffer, uint32_t width, uint32_t height )
 {
-	if ( !buffer )
+	byte *full;
+	uint32_t x, y;
+
+	if ( !buffer || !width || !height || gl3_width <= 0 || gl3_height <= 0 )
 		return;
 
+	// The callers (screenshots, save thumbnail) hand in their own rectangle,
+	// which is not necessarily the render target size (r_renderScale,
+	// r_ext_supersample, the 256x256 thumbnail). Read the whole target once and
+	// resample nearest-neighbour into the requested rectangle, bottom-up RGB --
+	// the same layout the Vulkan backend produces (see RB_ReadPixels).
+	full = (byte *)ri.Malloc( gl3_width * gl3_height * 4 );
+	if ( !full ) {
+		Com_Memset( buffer, 0, (size_t)width * height * 3 );
+		return;
+	}
+
 	qglBindFramebuffer( GL_FRAMEBUFFER, gl3_main_fbo );
-	qglReadPixels( 0, 0, (GLsizei)width, (GLsizei)height, GL_RGBA, GL_UNSIGNED_BYTE, buffer );
+	qglPixelStorei( GL_PACK_ALIGNMENT, 1 );
+	qglReadPixels( 0, 0, gl3_width, gl3_height, GL_RGBA, GL_UNSIGNED_BYTE, full );
 	qglBindFramebuffer( GL_FRAMEBUFFER, 0 );
+
+	for ( y = 0; y < height; y++ ) {
+		uint32_t sy = (uint32_t)( (uint64_t)y * gl3_height / height );
+		byte *dst = buffer + (size_t)y * width * 3;
+
+		if ( sy >= (uint32_t)gl3_height )
+			sy = gl3_height - 1;
+
+		for ( x = 0; x < width; x++ ) {
+			uint32_t sx = (uint32_t)( (uint64_t)x * gl3_width / width );
+			byte *src;
+
+			if ( sx >= (uint32_t)gl3_width )
+				sx = gl3_width - 1;
+			src = full + ( (size_t)sy * gl3_width + sx ) * 4;
+			dst[x * 3 + 0] = src[0];
+			dst[x * 3 + 1] = src[1];
+			dst[x * 3 + 2] = src[2];
+		}
+	}
+
+	ri.Free( full );
 }
 
 qboolean vk_bloom( void )
 {
-	if ( r_bloom->integer && !gl3_bloom_warned ) {
-		gl3_bloom_warned = qtrue;
-		ri.Printf( PRINT_WARNING, "GLES3: bloom is not implemented by this backend; ignoring r_bloom\n" );
-	}
-	return qfalse;
+	// The front end calls this once the opaque surfaces are drawn, but with
+	// MSAA the scene is only readable after the resolve in vk_end_frame().
+	// Record the request and run the chain there (before the gamma composite).
+	if ( r_bloom->integer )
+		gl3_bloom_pending = qtrue;
+	return gl3_bloom_pending;
 }
 
 qboolean vk_alloc_vbo( const byte *vbo_data, int vbo_size )
@@ -2086,28 +2789,257 @@ const char *GL3_BackendStatus( void )
 }
 
 // ---------------------------------------------------------------------------
-// Flares
+// Flares (M5)
 //
-// The Vulkan backend tests flare visibility by rendering a point sprite that
-// writes a storage-buffer flag through the fragment shader (there is no depth
-// readback in Vulkan) and reading the flag back the next frame. GLES 3.2 has no
-// equivalent without a framebuffer-fetch extension, and the GLES backend does
-// not render point sprites into the depth buffer, so flares are disabled here
-// rather than faked. r_flares is off by default and stays off for this backend;
-// AUDIT.md tracks a GLES visibility test as remaining work.
+// The Vulkan backend tests visibility by rendering a one-pixel point into a
+// storage buffer through the depth test and reading the flag back next frame
+// (Vulkan has no depth readback). GLES 3.0 has occlusion queries, which are the
+// same idea with the same one-frame delay: draw the test fragment at the
+// flare's window position and depth inside a GL_ANY_SAMPLES_PASSED query; if
+// the pixel passes the depth test, the flare is visible. Cost: one 1px draw and
+// one query per flare per frame, plus a one-frame latency (identical to the
+// Vulkan path and to the fade behaviour the flare code already implements).
 // ---------------------------------------------------------------------------
 
 void R_ClearFlares( void )
 {
+	int i;
+
+	for ( i = 0; i < GL3_MAX_FLARES; i++ ) {
+		if ( gl3_flares[i].query ) {
+			qglDeleteQueries( 1, &gl3_flares[i].query );
+		}
+	}
+	Com_Memset( gl3_flares, 0, sizeof( gl3_flares ) );
+}
+
+static gl3_flare_t *GL3_FindFlare( void *surface, int sceneNum, int portalView )
+{
+	int i;
+
+	for ( i = 0; i < GL3_MAX_FLARES; i++ ) {
+		if ( gl3_flares[i].used && gl3_flares[i].surface == surface &&
+		     gl3_flares[i].frameSceneNum == sceneNum && gl3_flares[i].portalView == portalView )
+			return &gl3_flares[i];
+	}
+	return NULL;
 }
 
 void RB_AddFlare( void *surface, int fogNum, vec3_t point, vec3_t color, vec3_t normal )
 {
-	(void)surface; (void)fogNum; (void)point; (void)color; (void)normal;
+	gl3_flare_t *f;
+	vec3_t local;
+	float d = 1.0f;
+	vec4_t eye, clip, normalized, window;
+	int i;
+
+	if ( normal && ( normal[0] || normal[1] || normal[2] ) ) {
+		VectorSubtract( backEnd.viewParms.or.origin, point, local );
+		VectorNormalizeFast( local );
+		d = DotProduct( local, normal );
+		if ( d < 0 )
+			return;	// viewer is behind the flare
+	}
+
+	R_TransformModelToClip( point, backEnd.or.modelMatrix, backEnd.viewParms.projectionMatrix, eye, clip );
+
+	for ( i = 0; i < 3; i++ ) {
+		if ( clip[i] >= clip[3] || clip[i] <= -clip[3] )
+			return;
+	}
+
+	R_TransformClipToWindow( clip, &backEnd.viewParms, normalized, window );
+
+	if ( window[0] < 0 || window[0] >= backEnd.viewParms.viewportWidth ||
+	     window[1] < 0 || window[1] >= backEnd.viewParms.viewportHeight )
+		return;
+
+	f = GL3_FindFlare( surface, backEnd.viewParms.frameSceneNum, backEnd.viewParms.portalView );
+	if ( !f ) {
+		for ( i = 0; i < GL3_MAX_FLARES; i++ ) {
+			if ( !gl3_flares[i].used ) {
+				f = &gl3_flares[i];
+				Com_Memset( f, 0, sizeof( *f ) );
+				f->used = qtrue;
+				f->surface = surface;
+				f->frameSceneNum = backEnd.viewParms.frameSceneNum;
+				f->portalView = backEnd.viewParms.portalView;
+				f->fadeTime = backEnd.refdef.time - 2000;
+				break;
+			}
+		}
+		if ( !f )
+			return;
+	}
+
+	f->addedFrame = backEnd.viewParms.frameCount;
+	f->fogNum = fogNum;
+	VectorCopy( point, f->origin );
+	VectorCopy( color, f->color );
+	VectorScale( f->color, d, f->color );
+
+	f->windowX = (float)backEnd.viewParms.viewportX + window[0];
+	f->windowY = (float)backEnd.viewParms.viewportY + window[1];
+	f->eyeZ = eye[2];
+#ifdef USE_REVERSED_DEPTH
+	f->drawZ = ( clip[2] + 0.20f ) / clip[3];
+#else
+	f->drawZ = ( clip[2] - 0.20f ) / clip[3];
+#endif
+}
+
+// Render the flare quad itself: the Vulkan backend's size/intensity/fog maths,
+// drawn through the usual 2D surface path in window coordinates.
+static void GL3_RenderFlare( gl3_flare_t *f )
+{
+	float size, distance, intensity, factor;
+	byte fogFactors[3] = { 255, 255, 255 };
+	color4ub_t c;
+	vec3_t color;
+
+	if ( f->eyeZ > -1.0f )
+		distance = 1.0f;
+	else
+		distance = -f->eyeZ;
+
+	size = (float)backEnd.viewParms.viewportWidth * ( r_flareSize->value / 640.0f + 8.0f / distance );
+	factor = distance + size * sqrt( r_flareCoeff->value );
+	intensity = r_flareCoeff->value * size * size / ( factor * factor );
+	VectorScale( f->color, f->drawIntensity * intensity, color );
+
+	if ( tr.world && f->fogNum > 0 && f->fogNum < tr.world->numfogs ) {
+		tess.numVertexes = 1;
+		VectorCopy( f->origin, tess.xyz[0] );
+		tess.fogNum = f->fogNum;
+		RB_CalcModulateColorsByFog( fogFactors );
+		if ( !( fogFactors[0] || fogFactors[1] || fogFactors[2] ) )
+			return;
+	}
+
+	RB_BeginSurface( tr.flareShader, f->fogNum );
+	c.rgba[0] = (byte)( color[0] * fogFactors[0] );
+	c.rgba[1] = (byte)( color[1] * fogFactors[1] );
+	c.rgba[2] = (byte)( color[2] * fogFactors[2] );
+	c.rgba[3] = 255;
+	RB_AddQuadStamp2( f->windowX - size, f->windowY - size, size * 2.0f, size * 2.0f, 0, 0, 1, 1, c );
+	RB_EndSurface();
+}
+
+// Depth-visibility test for the next frame: one pixel at the flare's window
+// position and depth, inside an occlusion query.
+static void GL3_TestFlare( gl3_flare_t *f )
+{
+	float x, y, z;
+	float verts[4][3];
+	GLuint prevProgram;
+	int x0, y0;
+
+	if ( !gl3_flare_prog ) {
+		gl3_flare_prog = GL3_LinkProgram( "color.vert", "color.frag", NULL );
+		if ( gl3_flare_prog ) {
+			GLint loc = qglGetUniformLocation( gl3_flare_prog, "color_mode" );
+			if ( loc >= 0 ) qglUniform1i( loc, 0 );
+			gl3_flare_mvp_loc = qglGetUniformLocation( gl3_flare_prog, "mvp" );
+		}
+	}
+	if ( !gl3_flare_prog || !gl3_flare_vbo || !f->query )
+		return;
+
+	// Window coordinates -> NDC. The 2D transform is y-down, so invert here.
+	x = 2.0f * f->windowX / (float)gl3_width - 1.0f;
+	y = 1.0f - 2.0f * f->windowY / (float)gl3_height;
+	z = f->drawZ;
+	x0 = (int)f->windowX;
+	y0 = (int)f->windowY;
+	(void)x0; (void)y0;
+
+	verts[0][0] = x - 0.5f / (float)gl3_width;  verts[0][1] = y - 0.5f / (float)gl3_height; verts[0][2] = z;
+	verts[1][0] = x + 0.5f / (float)gl3_width;  verts[1][1] = verts[0][1];                  verts[1][2] = z;
+	verts[2][0] = verts[0][0];                  verts[2][1] = y + 0.5f / (float)gl3_height; verts[2][2] = z;
+	verts[3][0] = verts[1][0];                  verts[3][1] = verts[2][1];                  verts[3][2] = z;
+
+	qglBindVertexArray( gl3_vao );
+	qglBindBuffer( GL_ARRAY_BUFFER, gl3_flare_vbo );
+	qglBufferData( GL_ARRAY_BUFFER, sizeof( verts ), verts, GL_STREAM_DRAW );
+	qglEnableVertexAttribArray( 0 );
+	qglVertexAttribPointer( 0, 3, GL_FLOAT, GL_FALSE, sizeof( verts[0] ), (const void *)0 );
+
+	prevProgram = 0;
+	qglUseProgram( gl3_flare_prog );
+	if ( gl3_flare_mvp_loc >= 0 ) {
+		float ident[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
+		qglUniformMatrix4fv( gl3_flare_mvp_loc, 1, GL_FALSE, ident );
+	}
+
+	qglEnable( GL_DEPTH_TEST );
+	qglDepthMask( GL_FALSE );
+	qglDepthFunc( GL_GEQUAL );
+	qglDisable( GL_CULL_FACE );
+	qglDisable( GL_BLEND );
+	qglColorMask( GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE );
+
+	qglBeginQuery( GL_ANY_SAMPLES_PASSED, f->query );
+	qglDrawArrays( GL_TRIANGLE_STRIP, 0, 4 );
+	qglEndQuery( GL_ANY_SAMPLES_PASSED );
+
+	qglColorMask( GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE );
+	qglDepthMask( GL_FALSE );
+	qglUseProgram( prevProgram );
 }
 
 void RB_RenderFlares( void )
 {
+	gl3_flare_t *f;
+	int i;
+	GLboolean projection2D;
+
+	if ( !r_flares->integer || !gl3_flares )
+		return;
+	if ( vk.renderPassIndex == RENDER_PASS_SCREENMAP || backEnd.isHyperspace )
+		return;
+
+	backEnd.currentEntity = &tr.worldEntity;
+	backEnd.or = backEnd.viewParms.world;
+
+	for ( i = 0; i < GL3_MAX_FLARES; i++ ) {
+		f = &gl3_flares[i];
+		if ( !f->used )
+			continue;
+		if ( f->frameSceneNum != backEnd.viewParms.frameSceneNum ||
+		     f->portalView != backEnd.viewParms.portalView )
+			continue;
+
+		// Query result from the previous frame (one-frame delay, as Vulkan).
+		if ( f->queryPending ) {
+			GLuint samples = 0;
+			qglGetQueryObjectuiv( f->query, GL_QUERY_RESULT, &samples );
+			f->visible = samples ? qtrue : qfalse;
+			f->queryPending = qfalse;
+		}
+
+		if ( f->visible ) {
+			f->fadeTime = backEnd.refdef.time;
+			f->drawIntensity = 1.0f;
+		} else {
+			f->drawIntensity = 1.0f - ( ( backEnd.refdef.time - f->fadeTime ) / 1000.0f ) * r_flareFade->value;
+		}
+		if ( f->drawIntensity < 0.0f )
+			f->drawIntensity = 0.0f;
+		else if ( f->drawIntensity > 1.0f )
+			f->drawIntensity = 1.0f;
+
+		projection2D = backEnd.projection2D;
+		backEnd.projection2D = qtrue;
+		GL3_DefaultMVP( gl3_mvp );
+		if ( f->drawIntensity > 0.0f )
+			GL3_RenderFlare( f );
+		backEnd.projection2D = projection2D;
+
+		GL3_TestFlare( f );
+		f->queryPending = qtrue;
+	}
+
+	backEnd.projection2D = qfalse;
 }
 
 // ---------------------------------------------------------------------------
