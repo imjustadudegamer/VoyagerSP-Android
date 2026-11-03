@@ -2413,6 +2413,52 @@ void Com_ExecuteCfg(void)
 			Cvar_Get( "in_androidDefaults", "0", CVAR_ARCHIVE );
 			Cvar_Set( "in_androidDefaults", XSTRING( ANDROID_DEFAULTS_VERSION ) );
 		}
+#elif defined( ELITEFORCE ) && defined( __linux__ )
+		// One-time DESKTOP input defaults: the same EF1 dual-analog gamepad
+		// binds the Android build installs, applied in code because the
+		// desktop port has no shipped baseEF/*.cfg (that directory is the
+		// user's retail data). Keyboard + mouse retail binds still come from
+		// the game's own default.cfg inside pak0.  Same one-shot stamp
+		// scheme as Android so user rebinds in the Controls menu persist.
+#define DESKTOP_DEFAULTS_VERSION 1
+		if ( Cvar_VariableIntegerValue( "in_desktopDefaults" ) < DESKTOP_DEFAULTS_VERSION )
+		{
+			Cbuf_AddText(
+				"seta in_joystick 1\n"
+				"seta in_joystickUseAnalog 1\n"
+				"seta joy_threshold 0.15\n"
+				"seta j_forward -0.004\n"
+				"seta j_side 0.004\n"
+				"seta j_pitch 0.0055\n"
+				"seta j_yaw -0.0075\n"
+				"bind PAD0_LEFTSTICK_UP \"+forward\"\n"
+				"bind PAD0_LEFTSTICK_DOWN \"+back\"\n"
+				"bind PAD0_LEFTSTICK_LEFT \"+moveleft\"\n"
+				"bind PAD0_LEFTSTICK_RIGHT \"+moveright\"\n"
+				"bind PAD0_RIGHTSTICK_UP \"+lookup\"\n"
+				"bind PAD0_RIGHTSTICK_DOWN \"+lookdown\"\n"
+				"bind PAD0_RIGHTSTICK_LEFT \"+left\"\n"
+				"bind PAD0_RIGHTSTICK_RIGHT \"+right\"\n"
+				"bind PAD0_RIGHTTRIGGER \"+attack\"\n"
+				"bind PAD0_LEFTTRIGGER \"+altattack\"\n"
+				"bind PAD0_RIGHTSHOULDER \"weapnext\"\n"
+				"bind PAD0_LEFTSHOULDER \"weapprev\"\n"
+				"bind PAD0_A \"+moveup\"\n"
+				"bind PAD0_B \"+movedown\"\n"
+				"bind PAD0_X \"+use\"\n"
+				"bind PAD0_Y \"weapnext\"\n"
+				"bind PAD0_RIGHTSTICK_CLICK \"+zoom\"\n"
+				"bind PAD0_DPAD_UP \"+button2\"\n"
+				"bind PAD0_DPAD_DOWN \"+button3\"\n"
+				"bind PAD0_DPAD_LEFT \"weapprev\"\n"
+				"bind PAD0_DPAD_RIGHT \"weapnext\"\n"
+				"bind PAD0_START \"togglemenu\"\n"
+				"bind PAD0_BACK \"+info\"\n"
+			);
+			Cbuf_Execute();
+			Cvar_Get( "in_desktopDefaults", "0", CVAR_ARCHIVE );
+			Cvar_Set( "in_desktopDefaults", XSTRING( DESKTOP_DEFAULTS_VERSION ) );
+		}
 #endif
 	}
 }
@@ -2866,6 +2912,10 @@ void Com_Init( char *commandLine ) {
 	// session's hmconfig.cfg write, making the defaults re-apply (and clobber
 	// user settings) every boot. Re-mark so the stamp persists.
 	if ( Cvar_VariableIntegerValue( "in_androidDefaults" ) )
+		cvar_modifiedFlags |= CVAR_ARCHIVE;
+#elif defined( ELITEFORCE ) && defined( __linux__ )
+	// Same persistence fix for the one-time desktop input defaults.
+	if ( Cvar_VariableIntegerValue( "in_desktopDefaults" ) )
 		cvar_modifiedFlags |= CVAR_ARCHIVE;
 #endif
 

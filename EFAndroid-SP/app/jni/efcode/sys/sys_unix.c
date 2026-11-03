@@ -51,6 +51,18 @@ qboolean stdinIsATTY;
 // Used to determine where to store user-specific files
 static char homePath[ MAX_OSPATH ] = { 0 };
 
+#ifndef __ANDROID__
+// Desktop: set by sys_main.c from the engine-side retail-data importer
+// (VOYAGERSP_DATA_ROOT / --data-dir / the XDG default).  When empty the
+// historical com_homepath + XDG resolution below is used.
+static char defaultHomePath[ MAX_OSPATH ] = { 0 };
+
+void Sys_SetDefaultHomePath( const char *path )
+{
+	Q_strncpyz( defaultHomePath, path ? path : "", sizeof( defaultHomePath ) );
+}
+#endif
+
 // Used to store the Steam Quake 3 installation path
 static char steamPath[ MAX_OSPATH ] = { 0 };
 
@@ -76,6 +88,16 @@ char *Sys_DefaultHomePath(void)
 	if( !*homePath )
 		Q_strncpyz( homePath, ANDROID_DATA_ROOT, sizeof(homePath) );
 	return homePath;
+#endif
+
+#ifndef __ANDROID__
+	/* Desktop: the importer already resolved the one data root.  fs_homepath
+	   == fs_basepath == that root (no +set from the launcher). */
+	if( *defaultHomePath )
+	{
+		Q_strncpyz( homePath, defaultHomePath, sizeof(homePath) );
+		return homePath;
+	}
 #endif
 
 	if( !*homePath && com_homepath != NULL )

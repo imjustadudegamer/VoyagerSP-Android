@@ -1286,10 +1286,24 @@ GL-free: it creates an SDL_WINDOW_VULKAN window and a VkSurfaceKHR via SDL.
 */
 #include <SDL_vulkan.h>
 
+#ifndef __ANDROID__
+/* Q3/EF1 r_mode -> resolution table (the Video menu writes these indices). */
+static const int vk_mode_sizes[][2] = {
+	{  320,  240 }, {  400,  300 }, {  512,  384 }, {  640,  480 },
+	{  800,  600 }, {  960,  720 }, { 1024,  768 }, { 1152,  864 },
+	{ 1280,  960 }, { 1600, 1200 }, { 2048, 1536 }, {  856,  480 }
+};
+#define VK_NUM_MODES ((int)( sizeof( vk_mode_sizes ) / sizeof( vk_mode_sizes[0] ) ))
+#endif
+
 void VKimp_Init( glconfig_t *config )
 {
 	SDL_DisplayMode dm;
 	int dw = 0, dh = 0;
+#ifndef __ANDROID__
+	int winW, winH, fullscreen, mode;
+	Uint32 winFlags;
+#endif
 
 	ri.Printf( PRINT_ALL, "VKimp_Init( )\n" );
 
@@ -1305,11 +1319,83 @@ void VKimp_Init( glconfig_t *config )
 
 	if ( SDL_GetDesktopDisplayMode( 0, &dm ) != 0 ) { dm.w = 1280; dm.h = 720; dm.refresh_rate = 60; }
 
+#ifdef __ANDROID__
+	/* Android is unchanged: immersive fullscreen at the device resolution. */
 	SDL_window = SDL_CreateWindow( CLIENT_WINDOW_TITLE,
 		SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, dm.w, dm.h,
 		SDL_WINDOW_SHOWN | SDL_WINDOW_VULKAN | SDL_WINDOW_FULLSCREEN );
 	if ( !SDL_window )
 		ri.Error( ERR_FATAL, "VKimp_Init: SDL_CreateWindow(VULKAN) failed: %s", SDL_GetError() );
+	config->isFullscreen = qtrue;
+#else
+	/*
+	 * Linux desktop: a normal resizable windowed game, NOT a fullscreen
+	 * takeover.  Fullscreen only happens when the user asks for it through
+	 * r_fullscreen / vid_fullscreen (Video menu, Alt+Enter) or the launcher's
+	 * --fullscreen flag (delivered as +set r_fullscreen 1).
+	 */
+	{
+		cvar_t *r_fullscreen_cv   = ri.Cvar_Get( "r_fullscreen",   "0", CVAR_ARCHIVE );
+		cvar_t *vid_fullscreen_cv = ri.Cvar_Get( "vid_fullscreen", "0", CVAR_ARCHIVE );
+		cvar_t *allow_resize_cv   = ri.Cvar_Get( "r_allowResize",  "1", CVAR_ARCHIVE );
+		cvar_t *center_window_cv  = ri.Cvar_Get( "r_centerWindow", "1", CVAR_ARCHIVE );
+
+		ri.Cvar_Get( "r_customwidth",  "1280", CVAR_ARCHIVE );
+		ri.Cvar_Get( "r_customheight", "720",  CVAR_ARCHIVE );
+		ri.Cvar_Get( "r_mode",         "-1",   CVAR_ARCHIVE );
+
+		fullscreen = r_fullscreen_cv->integer != 0;
+
+		/* vid_fullscreen is accepted as an alias.  It only switches the
+		   window on when it asks for fullscreen AND r_fullscreen does not;
+		   otherwise the two are kept in sync for the next boot. */
+		if ( vid_fullscreen_cv->integer && !fullscreen ) {
+			fullscreen = 1;
+			ri.Cvar_Set( "r_fullscreen", "1" );
+		} else if ( vid_fullscreen_cv->integer != fullscreen ) {
+			ri.Cvar_Set( "vid_fullscreen", fullscreen ? "1" : "0" );
+		}
+
+		mode = ri.Cvar_VariableIntegerValue( "r_mode" );
+		winW = ri.Cvar_VariableIntegerValue( "r_customwidth" );
+		winH = ri.Cvar_VariableIntegerValue( "r_customheight" );
+
+		if ( mode == -2 ) {
+			/* native desktop size, still inside a normal window */
+			winW = dm.w;
+			winH = dm.h;
+		} else if ( mode >= 0 && mode < VK_NUM_MODES ) {
+			winW = vk_mode_sizes[mode][0];
+			winH = vk_mode_sizes[mode][1];
+		}
+		if ( winW < 320 ) winW = 1280;
+		if ( winH < 240 ) winH = 720;
+
+		/* never open a window larger than the desktop */
+		if ( !fullscreen ) {
+			if ( dm.w > 0 && winW > dm.w ) winW = dm.w;
+			if ( dm.h > 0 && winH > dm.h ) winH = dm.h;
+		}
+
+		winFlags = SDL_WINDOW_SHOWN | SDL_WINDOW_VULKAN;
+		if ( fullscreen )
+			winFlags |= SDL_WINDOW_FULLSCREEN;
+		else if ( allow_resize_cv->integer )
+			winFlags |= SDL_WINDOW_RESIZABLE;
+
+		SDL_window = SDL_CreateWindow( CLIENT_WINDOW_TITLE,
+			( fullscreen || !center_window_cv->integer ) ? SDL_WINDOWPOS_UNDEFINED : SDL_WINDOWPOS_CENTERED,
+			( fullscreen || !center_window_cv->integer ) ? SDL_WINDOWPOS_UNDEFINED : SDL_WINDOWPOS_CENTERED,
+			winW, winH, winFlags );
+		if ( !SDL_window )
+			ri.Error( ERR_FATAL, "VKimp_Init: SDL_CreateWindow(VULKAN) failed: %s", SDL_GetError() );
+
+		config->isFullscreen = fullscreen ? qtrue : qfalse;
+		ri.Printf( PRINT_ALL, "VKimp_Init: %dx%d %s%s\n", winW, winH,
+		           fullscreen ? "fullscreen" : "windowed",
+		           ( !fullscreen && ( winFlags & SDL_WINDOW_RESIZABLE ) ) ? ", resizable" : "" );
+	}
+#endif
 
 	SDL_Vulkan_GetDrawableSize( SDL_window, &dw, &dh );
 	if ( dw <= 0 || dh <= 0 ) SDL_GetWindowSize( SDL_window, &dw, &dh );
@@ -1318,7 +1404,6 @@ void VKimp_Init( glconfig_t *config )
 	config->vidHeight = dh;
 	config->windowAspect = (float)dw / (float)dh;
 	config->displayFrequency = dm.refresh_rate;
-	config->isFullscreen = qtrue;
 	config->deviceSupportsGamma = qfalse;
 	config->colorBits = 32;
 	config->depthBits = 24;

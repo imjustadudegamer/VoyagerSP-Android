@@ -50,6 +50,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "../qcommon/q_shared.h"
 #include "../qcommon/qcommon.h"
+#include "data_import.h"
 
 #ifdef __ANDROID__
 #include <SDL.h>
@@ -57,6 +58,14 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 static char binaryPath[ MAX_OSPATH ] = { 0 };
 static char installPath[ MAX_OSPATH ] = { 0 };
+
+#ifndef __ANDROID__
+/* Resolved by the engine-side retail-data importer before any SDL/Vulkan
+   work happens.  Feeds both fs_basepath and fs_homepath, so the launcher
+   does not have to pass +set.  -1 = leave the engine default. */
+static char dataRoot[ MAX_OSPATH ] = { 0 };
+static int launcherFullscreen = -1;
+#endif
 
 /*
 =================
@@ -831,9 +840,39 @@ int main( int argc, char **argv )
 		argc = 1;
 #endif
 
+	/* --version / -v (and Apple's -psn) are handled before the data import:
+	   printing the version must never require the retail game data. */
 	Sys_ParseArgs( argc, argv );
+
+#ifndef __ANDROID__
+	/*
+	 * Desktop-only retail-data import stage.  This runs BEFORE any SDL video
+	 * or Vulkan initialisation (Com_Init -> FS_InitFilesystem -> CL_Init ->
+	 * VKimp_Init all happen further down): it validates <root>/baseEF or asks
+	 * the user for the retail files, exactly like ImportActivity.java does on
+	 * Android.  It also strips its own flags from argv and resolves the data
+	 * root that feeds fs_basepath AND fs_homepath below.
+	 */
+	{
+		dataImportResult_t import;
+		int importRc = DataImport_PreInit( &argc, &argv, &import );
+
+		if ( importRc >= 0 )
+			return importRc;        /* 0 / 2 / 3 / 4 from the import path */
+
+		Q_strncpyz( dataRoot, import.dataRoot, sizeof( dataRoot ) );
+		launcherFullscreen = import.fullscreen;
+	}
+#endif
+
 	Sys_SetBinaryPath( Sys_Dirname( argv[ 0 ] ) );
+#ifdef __ANDROID__
 	Sys_SetDefaultInstallPath( DEFAULT_BASEDIR );
+#else
+	/* fs_basepath and fs_homepath both come from the importer's data root. */
+	Sys_SetDefaultInstallPath( dataRoot );
+	Sys_SetDefaultHomePath( dataRoot );
+#endif
 
 	// Concatenate the command line for passing to Com_Init
 	for( i = 1; i < argc; i++ )
@@ -864,6 +903,14 @@ int main( int argc, char **argv )
 
 		Q_strcat( commandLine, sizeof( commandLine ), " " );
 	}
+
+#ifndef __ANDROID__
+	/* Launcher --fullscreen / --windowed: delivered as +set so it is applied
+	   after the config files (Com_StartupVariable) and wins this boot. */
+	if ( launcherFullscreen >= 0 )
+		Q_strcat( commandLine, sizeof( commandLine ),
+		          launcherFullscreen ? "+set r_fullscreen 1 " : "+set r_fullscreen 0 " );
+#endif
 
 #ifdef PROTOCOL_HANDLER
 	if ( protocolCommand != NULL )

@@ -59,6 +59,10 @@ void Sys_GLimpInit( void );
 void Sys_CommandLineInit( int *argcP, char ***argvP );
 void Sys_PlatformInit( void );
 void Sys_PlatformExit( void );
+#ifndef __ANDROID__
+/* Desktop: force fs_homepath to the importer's data root. */
+void Sys_SetDefaultHomePath( const char *path );
+#endif
 void Sys_SigHandler( int signal ) __attribute__ ((noreturn));
 void Sys_ErrorDialog( const char *error );
 void Sys_AnsiColorPrint( const char *msg );

@@ -533,6 +533,10 @@ void CL_ReadPackets (void);
 void CL_WritePacket( void );
 void IN_CenterView (void);
 
+/* Force feedback (sdl_input.c): no-op without a rumble-capable controller or
+   when in_rumble is 0.  low/high are 0..1 motor strengths. */
+void IN_Rumble( float low, float high, int ms );
+
 void CL_VerifyCode( void );
 
 float CL_KeyState (kbutton_t *key);

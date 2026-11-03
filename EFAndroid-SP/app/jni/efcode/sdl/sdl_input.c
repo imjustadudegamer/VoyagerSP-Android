@@ -98,6 +98,17 @@ static cvar_t *in_joystick          = NULL;
 static cvar_t *in_joystickThreshold = NULL;
 static cvar_t *in_joystickNo        = NULL;
 static cvar_t *in_joystickUseAnalog = NULL;
+/* Force feedback (desktop): weapon-fire and damage pulses.  in_rumble
+   defaults to 0 on Android so that build's behaviour is unchanged. */
+static cvar_t *in_rumble            = NULL;
+static cvar_t *in_rumbleStrength    = NULL;
+static int     in_lastDamageEvent   = -1;
+#ifndef __ANDROID__
+/* Last desktop fullscreen state applied to the window (-1 = not seeded).
+   Reset in IN_Init so a vid_restart re-seeds it from r_fullscreen instead of
+   queuing a second restart for a change the menu already applied. */
+static int     in_lastFullscreen    = -1;
+#endif
 // CROUCH-as-toggle (default on) for BOTH the touch CROUCH button and the gamepad B button (K_PAD0_B).
 // Declared up here (not by the touch statics) so the gamepad button handler above can see them too.
 static cvar_t *cl_crouchToggle      = NULL;   // 1 (default) = CROUCH is a tap-toggle, not hold-to-crouch
@@ -611,6 +622,44 @@ struct
 
 /*
 ===============
+IN_Rumble
+
+Fire a short force-feedback pulse on the open game controller.  A harmless
+no-op when no pad is open, the pad reports no rumble motors, or in_rumble is
+0.  Called from CL_KeyDownEvent on +attack and from IN_Frame on damage.
+===============
+*/
+void IN_Rumble( float low, float high, int ms )
+{
+	float scale;
+	int lo, hi;
+
+	if ( !gamepad || !in_rumble || !in_rumble->integer )
+		return;
+#if SDL_VERSION_ATLEAST( 2, 0, 18 )
+	if ( !SDL_GameControllerHasRumble( gamepad ) )
+		return;
+#endif
+	scale = in_rumbleStrength ? in_rumbleStrength->value : 1.0f;
+	if ( scale < 0.0f ) scale = 0.0f;
+	if ( scale > 1.0f ) scale = 1.0f;
+	if ( low  < 0.0f ) low  = 0.0f;
+	if ( low  > 1.0f ) low  = 1.0f;
+	if ( high < 0.0f ) high = 0.0f;
+	if ( high > 1.0f ) high = 1.0f;
+	lo = (int)( 65535.0f * low  * scale );
+	hi = (int)( 65535.0f * high * scale );
+	if ( lo <= 0 && hi <= 0 )
+		return;
+#if SDL_VERSION_ATLEAST( 2, 0, 9 )
+	SDL_GameControllerRumble( gamepad, (Uint16)lo, (Uint16)hi, (Uint32)ms );
+#else
+	(void)ms;
+#endif
+}
+
+/*
+===============
 IN_InitJoystick
 ===============
 */
@@ -702,6 +751,25 @@ static void IN_InitJoystick( void )
 		Com_DPrintf("SDL_Init(SDL_INIT_GAMECONTROLLER) passed.\n");
 	}
 
+	/*
+	 * Optional user-supplied SDL controller mapping database, read from the
+	 * data root (fs_basepath) so a pad SDL 2.30 does not know yet can be
+	 * mapped without rebuilding the port.  SDL's built-in mapping DB is
+	 * always consulted as well.  Loaded after SDL_INIT_GAMECONTROLLER.
+	 */
+#if !defined( __ANDROID__ )
+	{
+		const char *base = Cvar_VariableString( "fs_basepath" );
+		if ( base && *base )
+		{
+			char dbPath[ MAX_OSPATH ];
+			Com_sprintf( dbPath, sizeof( dbPath ), "%s/gamecontrollerdb.txt", base );
+			if ( SDL_GameControllerAddMappingsFromFile( dbPath ) > 0 )
+				Com_Printf( "Loaded controller mappings from %s\n", dbPath );
+		}
+	}
+#endif
+
 	total = SDL_NumJoysticks();
 	Com_DPrintf("%d possible joysticks\n", total);
 
@@ -727,7 +795,7 @@ static void IN_InitJoystick( void )
 	if( in_joystickNo->integer < 0 || in_joystickNo->integer >= total )
 		Cvar_Set( "in_joystickNo", "0" );
 
-#ifdef __ANDROID__
+#if defined( __ANDROID__ ) || defined( __linux__ )
 	in_joystickUseAnalog = Cvar_Get( "in_joystickUseAnalog", "1", CVAR_ARCHIVE );
 #else
 	in_joystickUseAnalog = Cvar_Get( "in_joystickUseAnalog", "0", CVAR_ARCHIVE );
@@ -781,6 +849,11 @@ static void IN_ShutdownJoystick( void )
 
 	if ( !SDL_WasInit( SDL_INIT_JOYSTICK ) )
 		return;
+
+#if SDL_VERSION_ATLEAST( 2, 0, 9 )
+	if ( gamepad )
+		SDL_GameControllerRumble( gamepad, 0, 0, 0 );   /* never leave a motor buzzing */
+#endif
 
 	if (gamepad || stick)
 		IN_FlushGamepadState();
@@ -1900,7 +1973,23 @@ static void IN_ProcessEvents( void )
 				break;
 
 			case SDL_CONTROLLERDEVICEADDED:
+				/* Hot-plug. If no pad is open yet, adopt the one that was
+				   just added (the index SDL reports); otherwise keep the pad
+				   the player already selected. IN_InitJoystick() reopens and
+				   rebuilds in_availableJoysticks either way. */
+				if (in_joystick->integer)
+				{
+					if (!gamepad && e.cdevice.which >= 0 &&
+					    SDL_IsGameController(e.cdevice.which))
+						Cvar_SetValue("in_joystickNo", e.cdevice.which);
+					IN_InitJoystick();
+				}
+				break;
+
 			case SDL_CONTROLLERDEVICEREMOVED:
+				/* Hot-unplug: IN_InitJoystick() flushes every latched button
+				   and axis first (IN_FlushGamepadState), then reopens the
+				   first remaining pad so movement never sticks. */
 				if (in_joystick->integer)
 					IN_InitJoystick();
 				break;
@@ -2048,15 +2137,54 @@ void IN_Frame( void )
 
 	IN_JoyMove( );
 
+#ifndef __ANDROID__
+	/*
+	 * Damage force-feedback (desktop).  playerState.damageEvent changes when
+	 * the server registers a hit on the local player; scale the pulse with
+	 * the damage taken.  Weapon fire is pulsed from CL_KeyDownEvent instead.
+	 */
+	if ( gamepad && in_rumble && in_rumble->integer &&
+	     clc.state == CA_ACTIVE && cl.snap.valid )
+	{
+		int ev = cl.snap.ps.damageEvent;
+
+		if ( in_lastDamageEvent < 0 )
+			in_lastDamageEvent = ev;
+		else if ( ev != in_lastDamageEvent )
+		{
+			int dmg = cl.snap.ps.damageCount;
+#ifdef ELITEFORCE
+			if ( dmg <= 0 )
+				dmg = cl.snap.ps.damageShieldCount;
+#endif
+			in_lastDamageEvent = ev;
+			if ( dmg > 0 )
+			{
+				float s = 0.30f + (float)dmg / 50.0f;
+				if ( s > 1.0f )
+					s = 1.0f;
+				IN_Rumble( s, s * 0.5f, 220 );
+			}
+		}
+	}
+#endif
+
 	// If not DISCONNECTED (main menu) or ACTIVE (in game), we're loading
 	loading = ( clc.state != CA_DISCONNECTED && clc.state != CA_ACTIVE );
 
 	// update isFullscreen since it might of changed since the last vid_restart
 	cls.glconfig.isFullscreen = Cvar_VariableIntegerValue( "r_fullscreen" ) != 0;
 
+#ifdef __ANDROID__
 	if( !cls.glconfig.isFullscreen && ( Key_GetCatcher( ) & KEYCATCH_CONSOLE ) )
+#else
+	/* Desktop: release the pointer for the console in fullscreen too — a
+	   grabbed pointer with the console down is exactly the trap retail
+	   players do not expect.  (Android keeps its windowed-only rule.) */
+	if( Key_GetCatcher( ) & KEYCATCH_CONSOLE )
+#endif
 	{
-		// Console is down in windowed mode
+		// Console is down
 		IN_DeactivateMouse( cls.glconfig.isFullscreen, qtrue );
 	}
 	else if( !cls.glconfig.isFullscreen && loading )
@@ -2083,6 +2211,43 @@ void IN_Frame( void )
 	// Set event time for next frame to earliest possible time an event could happen
 	in_eventTime = Sys_Milliseconds( );
 
+#ifndef __ANDROID__
+	/*
+	 * Desktop fullscreen: r_fullscreen / vid_fullscreen recreate the window
+	 * and the Vulkan swapchain through the same vid_restart path the Video
+	 * menu uses (the swapchain extent is fixed when it is created).  Android
+	 * remains fullscreen-only and never reaches this block.
+	 */
+	{
+		int wantR = Cvar_VariableIntegerValue( "r_fullscreen" ) != 0;
+		int wantV = Cvar_VariableIntegerValue( "vid_fullscreen" ) != 0;
+		int want;
+
+		if ( in_lastFullscreen < 0 )
+			in_lastFullscreen = wantR;      /* seed from the boot value */
+
+		if ( wantR != in_lastFullscreen )
+			want = wantR;
+		else if ( wantV != in_lastFullscreen )
+			want = wantV;                   /* vid_fullscreen alias changed */
+		else
+			want = in_lastFullscreen;
+
+		if ( want != in_lastFullscreen )
+		{
+			in_lastFullscreen = want;
+			Cvar_SetValue( "r_fullscreen", want );
+			Cvar_SetValue( "vid_fullscreen", want );
+			Cbuf_AddText( "vid_restart\n" );
+		}
+		else if ( wantV != wantR )
+		{
+			/* the Video menu only writes r_fullscreen: keep the alias synced */
+			Cvar_SetValue( "vid_fullscreen", wantR );
+		}
+	}
+#endif
+
 	// In case we had to delay actual restart of video system
 	if( ( vidRestartTime != 0 ) && ( vidRestartTime < Sys_Milliseconds( ) ) )
 	{
@@ -2108,6 +2273,12 @@ void IN_Init( void *windowData )
 
 	SDL_window = (SDL_Window *)windowData;
 
+#ifndef __ANDROID__
+	/* Re-seed the fullscreen tracker after a vid_restart so IN_Frame does not
+	   queue a duplicate restart for a change VKimp_Init already applied. */
+	in_lastFullscreen = -1;
+#endif
+
 	Com_DPrintf( "\n------- Input Initialization -------\n" );
 
 	in_keyboardDebug = Cvar_Get( "in_keyboardDebug", "0", CVAR_ARCHIVE );
@@ -2117,7 +2288,41 @@ void IN_Init( void *windowData )
 	in_mouse = Cvar_Get( "in_mouse", "1", CVAR_ARCHIVE );
 	in_nograb = Cvar_Get( "in_nograb", "0", CVAR_ARCHIVE );
 
+#ifndef __ANDROID__
+	/*
+	 * Retail mouse parity on the desktop: relative mode must hand us RAW
+	 * deltas.  Disable SDL's warping implementation and its DPI / renderer /
+	 * system speed scaling so the only thing shaping the view is the engine
+	 * chain: sensitivity -> cl_mouseAccel -> cgameSensitivity (fov/75) ->
+	 * m_yaw/m_pitch.  The hints are read by SDL when relative mode is
+	 * enabled, so setting them here (before the first grab) is early enough.
+	 */
+#ifdef SDL_HINT_MOUSE_RELATIVE_MODE_WARP
+	SDL_SetHint( SDL_HINT_MOUSE_RELATIVE_MODE_WARP, "0" );
+#endif
+#ifdef SDL_HINT_MOUSE_RELATIVE_SCALING
+	SDL_SetHint( SDL_HINT_MOUSE_RELATIVE_SCALING, "0" );
+#endif
+#ifdef SDL_HINT_MOUSE_RELATIVE_SPEED_SCALE
+	SDL_SetHint( SDL_HINT_MOUSE_RELATIVE_SPEED_SCALE, "1.0" );
+#endif
+#ifdef SDL_HINT_MOUSE_RELATIVE_WARP_MOTION
+	SDL_SetHint( SDL_HINT_MOUSE_RELATIVE_WARP_MOTION, "0" );
+#endif
+#endif
+
+	/* Force feedback: enabled by default on the desktop build, opt-in on
+	   Android so that APK behaviour is untouched. */
 #ifdef __ANDROID__
+	in_rumble = Cvar_Get( "in_rumble", "0", CVAR_ARCHIVE );
+#else
+	in_rumble = Cvar_Get( "in_rumble", "1", CVAR_ARCHIVE );
+#endif
+	in_rumbleStrength = Cvar_Get( "in_rumbleStrength", "1.0", CVAR_ARCHIVE );
+
+#if defined( __ANDROID__ ) || defined( __linux__ )
+	/* Android and the Linux desktop: the controller is active out of the box
+	   (keyboard+mouse stay fully live at the same time). */
 	in_joystick = Cvar_Get( "in_joystick", "1", CVAR_ARCHIVE|CVAR_LATCH );
 #else
 	in_joystick = Cvar_Get( "in_joystick", "0", CVAR_ARCHIVE|CVAR_LATCH );

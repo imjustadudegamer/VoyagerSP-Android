@@ -1330,6 +1330,19 @@ void CL_KeyDownEvent( int key, unsigned time )
 		return;
 	}
 
+#ifndef __ANDROID__
+	/* Weapon-fire force feedback (desktop): pulse the controller whenever the
+	   first press of a key bound to +attack arrives, whether it came from the
+	   mouse, the keyboard or a gamepad trigger.  IN_Rumble is a no-op when no
+	   rumble-capable pad is open or in_rumble is 0. */
+	if ( clc.state == CA_ACTIVE && Key_GetCatcher( ) == 0 &&
+	     keys[key].repeats == 1 ) {
+		const char *bind = Key_GetBinding( key );
+		if ( bind && !Q_stricmp( bind, "+attack" ) )
+			IN_Rumble( 0.35f, 0.12f, 90 );
+	}
+#endif
+
 	// send the bound action
 	CL_ParseBinding( key, qtrue, time );
 

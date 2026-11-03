@@ -1396,6 +1396,19 @@ void CL_ClearState (void) {
 //	S_StopAllSounds();
 
 	Com_Memset( &cl, 0, sizeof( cl ) );
+
+#ifndef __ANDROID__
+	/*
+	 * Desktop mouse-look safety net.  CL_MouseMove multiplies the delta by
+	 * cl.cgameSensitivity, which the cgame refreshes every frame through
+	 * CG_SETUSERCMDVALUE (cgi_SetUserCmdValue -> sp_bridge.cpp ->
+	 * CL_SetUserCmdValue) as cg.refdef.fov_y / 75.  A zero here would make
+	 * mouse look dead until the first cgame frame; start it at the neutral
+	 * 1.0 so the desktop path can never inherit the CL_ClearState zero.
+	 * (On Android this is left untouched to keep that build byte-identical.)
+	 */
+	cl.cgameSensitivity = 1.0f;
+#endif
 }
 
 /*
