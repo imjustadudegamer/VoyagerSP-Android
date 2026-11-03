@@ -113,6 +113,11 @@ def convert(name, text):
     t = t.replace("greyscale != 0 )", "greyscale != 0.0 )")
     # Vulkan's gl_VertexIndex is gl_VertexID in GL.
     t = t.replace("gl_VertexIndex", "gl_VertexID")
+
+    # GLSL has no C-style floating-point suffix; glslang tolerates "1.0f" but
+    # mobile GLES compilers (Mali in particular) reject it, which is how the
+    # gamma program failed to build on the test device. Strip it.
+    t = re.sub(r'(\d(?:\.\d*)?(?:[eE][-+]?\d+)?)[fF](?![\w.])', r'\1', t)
     return t.rstrip() + "\n"
 
 

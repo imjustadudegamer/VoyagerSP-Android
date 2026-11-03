@@ -94,3 +94,58 @@ game. Or edit `efspconfig.cfg` and replace `cl_renderer "gles3"` with
   any mismatch recompiles from source.
 
 `renderer_gles3/AUDIT.md` §5 has the full milestone table and remaining work.
+
+
+## 6. After the 1.2.1 colour fix — what should change, what to send if not
+
+The 1.2.1 module fixes three root causes found from the 1.2.0 device log
+(Pixel 8 / Mali-G715). No per-texture swizzles were added; the byte order was
+verified against each producer instead.
+
+What the log must now show, and what changed:
+
+* `GLES3: backend initialized (2400x1080, gamma pass on, programs=N)` — the
+  gamma program now builds. 1.2.0 said "no gamma pass": Mali rejected
+  `gamma.vert` because the converted GLSL carried C-style `1.0f` literals
+  (glslang tolerated them, GLSL ES does not). The converter now strips the
+  suffix; the same fixed vertex shader also feeds the bloom/blur/blend passes.
+  The final image is therefore the gamma/bloom composite of the resolved main
+  target, not the raw blit.
+* No `GL_INVALID_VALUE`/`GL_INVALID_OPERATION` lines at present. The uniform
+  buffer object was only `glGenBuffers`'d, never allocated, so every draw's
+  `glBufferSubData(0, 128)` exceeded a zero-sized store (INVALID_VALUE) and the
+  fog/env/entity-colour uniforms never reached the shaders. That is why the 2D
+  UI (whose shaders do not declare the block) looked right while the 3D scene
+  did not. It is now allocated once as a dynamic uniform buffer.
+* Wrong colours on multi-texture / fixed-colour / identity stages were also
+  caused by the program's default uniforms being written without making the
+  program current (INVALID_OPERATION, and every value left at zero:
+  `tex_mode`, `color_mode`, `identity_color/alpha`). The defaults are now set
+  with the program bound, and `tex_mode`/`color_mode` are re-applied per draw.
+
+Byte order (proven, not assumed): every producer feeds RGBA — the TGA/BMP
+decoders write RGBA, the JPEG decoder explicitly expands RGB to RGBA, lightmap
+tiles are RGBA 4-byte pixels, the cinematic decoder (`sp/bink_ff.c`) converts to
+`AV_PIX_FMT_RGBA`, and `ResampleTexture`/the mip builder operate on 4-byte
+pixels. The Vulkan backend uploads these same buffers as
+`VK_FORMAT_R8G8B8A8_UNORM` (not BGRA). `GL_RGBA`/`GL_RGBA8` is therefore the
+correct upload for every class, and the UI art already rendered correctly with
+it — a global R/B swap would have broken the UI.
+
+If something is still wrong after flashing 1.2.1, send the log from the first
+~10 seconds plus the output of `gles3_selftest`, specifically:
+1. the `backend initialized (...)` line (must say `gamma pass on`);
+2. every `GLES3:` warning line (shader compile/link failures name the
+   permutation defines; GL errors now print the call group and `file:line`:
+   `bind index`, `draw: state`, `draw: uniform upload`, `present`);
+3. the selftest `UBO block=... data_size=... expected=128 (delta=...)` line
+   (delta must be 0) and the `attrib in_*` lines (0/1/2/5);
+4. whether the wrong colour is in the whole 3D view, only fogged areas, only
+   certain surfaces, or only the FMV — that distinguishes the remaining fog,
+   env, multitexture or cinematic paths.
+
+The intro FMV is a cinematic quad through the same 2D path and the same RGBA
+upload as the UI; with the uniform-default and UBO fixes in, if it is still
+magenta the next step is to add a one-shot log of the scratch image's
+`uploadWidth/uploadHeight` versus the frame's `cols/rows` (the only remaining
+way the upload rectangle can disagree with the texture).

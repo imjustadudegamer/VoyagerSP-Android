@@ -16,22 +16,22 @@ precision highp int;
 layout(location = 0) out vec2 frag_tex_coord;
 
 const vec2 v[4] = vec2[4](
-	vec2(-1.0f, 1.0f),
-	vec2(-1.0f,-1.0f),
-	vec2( 1.0f, 1.0f),
-	vec2( 1.0f,-1.0f)
+	vec2(-1.0, 1.0),
+	vec2(-1.0,-1.0),
+	vec2( 1.0, 1.0),
+	vec2( 1.0,-1.0)
 );
 
 const vec2 t[4] = vec2[4](
-	vec2( 0.0f, 1.0f),
-	vec2( 0.0f, 0.0f),
-	vec2( 1.0f, 1.0f),
-	vec2( 1.0f, 0.0f)
+	vec2( 0.0, 1.0),
+	vec2( 0.0, 0.0),
+	vec2( 1.0, 1.0),
+	vec2( 1.0, 0.0)
 );
 
 
 
 void main() {
-	gl_Position = vec4( v[ gl_VertexID ], 0.0f, 1.0f );
+	gl_Position = vec4( v[ gl_VertexID ], 0.0, 1.0 );
 	frag_tex_coord = t[ gl_VertexID ];
 }

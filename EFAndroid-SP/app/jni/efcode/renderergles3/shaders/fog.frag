@@ -45,11 +45,11 @@ void main() {
 	//vec4 fog = texture(fog_texture, fog_tex_coord);
 
     //if (alpha_test_func == 1) {
-    //    if (base.a == 0.0f) discard;
+    //    if (base.a == 0.0) discard;
     //} else if (alpha_test_func == 2) {
-    //    if (base.a >= 0.5f) discard;
+    //    if (base.a >= 0.5) discard;
     //} else if (alpha_test_func == 3) {
-    //    if (base.a < 0.5f) discard;
+    //    if (base.a < 0.5) discard;
     //}
 
 	//fog = fog * fogColor;

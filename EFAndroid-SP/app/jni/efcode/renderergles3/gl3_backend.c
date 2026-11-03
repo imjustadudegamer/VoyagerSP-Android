@@ -73,6 +73,8 @@ typedef struct {
 	int			loc_identity_color;
 	int			loc_identity_alpha;
 	int			loc_acff;
+	int			tex_mode;
+	int			color_mode;
 } gl3_program_t;
 
 #define GL3_MAX_PROGRAMS	64
@@ -1041,8 +1043,14 @@ static gl3_program_t *GL3_GetProgram( const Vk_Pipeline_Def *def )
 	prog->loc_identity_alpha = qglGetUniformLocation( program, "identity_alpha" );
 	prog->loc_acff = qglGetUniformLocation( program, "acff" );
 
-	// Texture units are fixed by layout(binding=N) in the GLSL, but setting the
-	// sampler uniforms explicitly is both harmless and robust across drivers.
+	// glUniform* requires the program to be current. Setting the defaults below
+	// without it is GL_INVALID_OPERATION and leaves every specialization value
+	// at zero (tex_mode 0, identity colour/alpha 0, ...), which is a wrong-colour
+	// bug on every multitexture/fixed-colour/identity stage. The sampler units
+	// are also set here so a driver that ignores layout(binding=) still samples
+	// the right textures.
+	qglUseProgram( prog->program );
+
 	if ( prog->loc_texture0 >= 0 ) qglUniform1i( prog->loc_texture0, 0 );
 	if ( prog->loc_texture1 >= 0 ) qglUniform1i( prog->loc_texture1, 1 );
 	if ( prog->loc_texture2 >= 0 ) qglUniform1i( prog->loc_texture2, 2 );
@@ -1060,6 +1068,11 @@ static gl3_program_t *GL3_GetProgram( const Vk_Pipeline_Def *def )
 	if ( prog->loc_identity_color >= 0 ) qglUniform1f( prog->loc_identity_color, 1.0f );
 	if ( prog->loc_identity_alpha >= 0 ) qglUniform1f( prog->loc_identity_alpha, 1.0f );
 	if ( prog->loc_acff >= 0 ) qglUniform1i( prog->loc_acff, 0 );
+
+	qglUseProgram( 0 );
+
+	prog->tex_mode = info.tex_mode;
+	prog->color_mode = info.color_mode;
 
 	GL3_CacheStore( prog );
 
@@ -1694,6 +1707,13 @@ void vk_initialize( void )
 	qglGenBuffers( 1, &gl3_vbo );
 	qglGenBuffers( 1, &gl3_ibo );
 	qglGenBuffers( 1, &gl3_ubo );
+	// A buffer object has no data store until glBufferData; glBufferSubData on a
+	// zero-sized store is GL_INVALID_VALUE (offset+size > GL_BUFFER_SIZE), which
+	// is what the device log showed every frame, and the uniforms never reached
+	// the shaders because of it. Allocate the per-draw uniform block once.
+	qglBindBuffer( GL_UNIFORM_BUFFER, gl3_ubo );
+	qglBufferData( GL_UNIFORM_BUFFER, (GLsizeiptr)sizeof( vkUniform_t ), NULL, GL_DYNAMIC_DRAW );
+	qglBindBuffer( GL_UNIFORM_BUFFER, 0 );
 	qglBindVertexArray( 0 );
 
 	GL3_CreateTargets();
@@ -2340,6 +2360,10 @@ void vk_bind_pipeline( uint32_t pipeline )
 		qglUniform1i( prog->loc_abs_light, def->abs_light ? 1 : 0 );
 	if ( prog->loc_acff >= 0 )
 		qglUniform1i( prog->loc_acff, def->fog_stage ? def->acff : 0 );
+	if ( prog->loc_tex_mode >= 0 )
+		qglUniform1i( prog->loc_tex_mode, prog->tex_mode );
+	if ( prog->loc_color_mode >= 0 )
+		qglUniform1i( prog->loc_color_mode, prog->color_mode );
 
 	// Alpha test function from the state bits (same mapping as the Vulkan
 	// specialization constants).
@@ -2492,6 +2516,8 @@ void vk_bind_index_ext( const int numIndexes, const uint32_t *indexes )
 	qglBufferData( GL_ELEMENT_ARRAY_BUFFER, numIndexes * (int)sizeof( glIndex_t ),
 		indexes, GL_STREAM_DRAW );
 	gl3_cmd.num_indexes = numIndexes;
+	if ( gl3_first_frame_checked < 60 )
+		GL3_CHECK( "bind index" );
 }
 
 uint32_t vk_tess_index( uint32_t numIndexes, const void *src )
@@ -2592,6 +2618,11 @@ void vk_draw_geometry( Vk_Depth_Range depth_range, qboolean indexed )
 
 	GL3_UploadUniforms();
 
+	// The program is current from vk_bind_pipeline(); set the sampler units
+	// explicitly so a driver that ignores layout(binding=) still samples the
+	// right textures.
+	qglUseProgram( prog->program );
+
 	if ( prog->loc_texture0 >= 0 ) qglUniform1i( prog->loc_texture0, 0 );
 	if ( prog->loc_texture1 >= 0 ) qglUniform1i( prog->loc_texture1, 1 );
 	if ( prog->loc_texture2 >= 0 ) qglUniform1i( prog->loc_texture2, 2 );
@@ -2606,6 +2637,9 @@ void vk_draw_geometry( Vk_Depth_Range depth_range, qboolean indexed )
 		qglBindVertexArray( gl3_vao );
 		return;
 	}
+
+	if ( gl3_first_frame_checked < 60 )
+		GL3_CHECK( "draw: state" );
 
 	if ( def->shader_type == TYPE_SIGNLE_TEXTURE_LIGHTING ||
 	     def->shader_type == TYPE_SIGNLE_TEXTURE_LIGHTING_LINEAR ) {
