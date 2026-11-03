@@ -7,6 +7,8 @@
 *.o
 *.a
 build64/
+# Platform build trees: build-linux/ (EF_PLATFORM=linux), build-ndk-check/ (Android)
+build-*/
 efsp_obb_backup/
 
 # Local config

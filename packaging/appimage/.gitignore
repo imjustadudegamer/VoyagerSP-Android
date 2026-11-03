@@ -1,0 +1,4 @@
+# Everything this pipeline creates is disposable build output.
+build/
+dist/
+logs/

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=VoyagerSP
+GenericName=First-person shooter
+Comment=Star Trek: Voyager — Elite Force (single player), native Linux port
+Exec=voyagersp
+Icon=com.voyager.efsp
+Terminal=false
+Categories=Game;ActionGame;
+Keywords=star trek;elite force;voyager;shooter;fps;
+StartupNotify=true
+StartupWMClass=voyagersp

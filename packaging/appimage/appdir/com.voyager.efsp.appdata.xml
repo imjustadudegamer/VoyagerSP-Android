@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AppStream metadata for the VoyagerSP AppImage.
+  Keep <id> and the file name identical (com.voyager.efsp), and keep the .desktop
+  file name (com.voyager.efsp.desktop) matched by <launchable>: appimagetool looks
+  the component up by that id when it embeds the metadata.
+-->
+<component type="desktop-application">
+  <id>com.voyager.efsp</id>
+
+  <name>VoyagerSP</name>
+  <summary>Star Trek: Voyager — Elite Force, single player, on native Linux</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-2.0-or-later</project_license>
+
+  <developer id="com.voyager">
+    <name>VoyagerSP contributors</name>
+  </developer>
+
+  <description>
+    <p>
+      VoyagerSP runs the single-player campaign of Star Trek: Voyager — Elite Force
+      natively on Linux: the id Tech 3 engine with the original Raven game, client-game
+      and UI modules, on a Vulkan renderer ported from Quake3e.
+    </p>
+    <p>
+      The retail game data is not included and cannot be downloaded here. An
+      installation of the original game (retail CD or the GOG release) is required;
+      VoyagerSP locates its BaseEF directory or is pointed at it with the
+      VOYAGERSP_DATA environment variable.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Vulkan renderer, widescreen and arbitrary resolutions</li>
+      <li>The original game modules, cutscenes and MP3 voice-over</li>
+      <li>Self-contained: no distribution packages needed beyond a Vulkan driver</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">com.voyager.efsp.desktop</launchable>
+
+  <url type="homepage">https://github.com/faithvoid/VoyagerNX</url>
+
+  <provides>
+    <binary>voyagersp</binary>
+  </provides>
+
+  <categories>
+    <category>Game</category>
+    <category>ActionGame</category>
+  </categories>
+
+  <keywords>
+    <keyword>star trek</keyword>
+    <keyword>elite force</keyword>
+    <keyword>voyager</keyword>
+    <keyword>shooter</keyword>
+    <keyword>fps</keyword>
+  </keywords>
+
+  <content_rating type="oars-1.1">
+    <content_attribute id="violence-fantasy">moderate</content_attribute>
+  </content_rating>
+
+  <releases>
+    <release version="__VOYAGERSP_VERSION__" date="__VOYAGERSP_DATE__"/>
+  </releases>
+
+  <requires>
+    <internet>offline-only</internet>
+  </requires>
+</component>

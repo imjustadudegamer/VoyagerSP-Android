@@ -1,0 +1,115 @@
+#!/bin/sh
+# AppRun — VoyagerSP (Star Trek: Voyager — Elite Force, single-player; native Linux port)
+#
+# The AppImage runtime executes this once it has mounted the image at $APPDIR.
+# It does only three things:
+#
+#   1. puts the bundled libraries on LD_LIBRARY_PATH, so the engine and the two
+#      modules it dlopen()s by bare name (libefgame.so, libefui.so) are found no
+#      matter where the image is mounted, and picks the Vulkan loader (the host's
+#      when there is one, the bundled fallback copy otherwise);
+#   2. resolves and exports ONE stable, writable data root and creates it;
+#   3. execs the engine, passing the user's arguments through untouched.
+#
+# The first-run import of the retail files (pak0.pk3 ... pak3.pk3 plus a genuine
+# efgamex86.dll) is an early startup mode of the engine itself — the same code
+# path the Android build uses — so this script implements none of it: no retail
+# discovery, no validation, no copying, no baseEF symlink, and no fs_basepath /
+# fs_homepath of its own. The engine derives both from VOYAGERSP_DATA_ROOT.
+#
+# Environment:
+#   VOYAGERSP_DATA_ROOT         writable data root (default below)
+#   VOYAGERSP_BUNDLED_VULKAN=1  force the bundled libvulkan.so.1 even if the host has one
+#
+# Engine flags (passed through, handled by the engine):
+#   --data-dir <path>  --import  --no-import  --import-from <dir>
+#
+# Nothing is ever written into the AppImage or into the retail installation.
+
+set -u
+
+APPDIR="${APPDIR:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)}"
+export APPDIR
+VERSION="__VOYAGERSP_VERSION__"
+BIN="$APPDIR/usr/bin/voyagersp"
+BUNDLED_VULKAN="$APPDIR/usr/lib/vulkan/libvulkan.so.1"
+DATA_ROOT="${VOYAGERSP_DATA_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/voyagersp}"
+
+say() { printf 'voyagersp: %s\n' "$*" >&2; }
+die() { printf 'voyagersp: error: %s\n' "$*" >&2; exit "${2:-1}"; }
+
+usage() {
+    cat <<EOF
+VoyagerSP $VERSION — Star Trek: Voyager — Elite Force, single player (native Linux)
+
+  VoyagerSP-*.AppImage [engine arguments]
+
+The retail game data is not included. On first run the game asks for the retail
+files (BaseEF/pak0.pk3 ... pak3.pk3 and efgamex86.dll), verifies them, copies
+them into its own data root and starts:
+
+  $DATA_ROOT/baseEF
+
+Set VOYAGERSP_DATA_ROOT to keep that data somewhere else (must be writable).
+Everything after this text is passed to the engine unchanged, including:
+  --data-dir <path>   --import   --no-import   --import-from <dir>
+  +set <cvar> <value>  (engine console commands)
+  e.g. +set r_mode -1 +set r_customwidth 1920 +set r_customheight 1080
+       +set s_initsound 0
+
+AppImage runtime options:
+  --appimage-extract-and-run  run without FUSE (slower; extracts to \$TMPDIR)
+  --appimage-extract          unpack the AppDir under ./squashfs-root
+  --appimage-version          print the runtime version
+  --apprun-version            print the VoyagerSP version
+  --apprun-help               this text
+EOF
+}
+
+case "${1:-}" in
+    --apprun-help)    usage; exit 0 ;;
+    --apprun-version) printf 'VoyagerSP %s\n' "$VERSION"; exit 0 ;;
+esac
+
+[ -x "$BIN" ] || die "the engine binary is missing from the image ($BIN) — the AppImage is broken" 3
+[ -f "$APPDIR/usr/lib/libefgame.so" ] || say "warning: libefgame.so is missing from the image"
+
+# --------------------------------------------------------------- 1. bundled libs
+# usr/lib first: SDL2, the four ffmpeg libraries and their dependencies, and the
+# two game modules all live there. The host keeps providing what is deliberately
+# not bundled (glibc, X11/Wayland, ALSA/PulseAudio, the GPU driver).
+LD_LIBRARY_PATH="$APPDIR/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH
+
+# ------------------------------------------------------------ 2. Vulkan loader
+# libvulkan.so.1 is the *loader*: it enumerates /usr/share/vulkan/icd.d and loads
+# the GPU driver (libvulkan_intel.so, libvulkan_radeon.so, nvidia_icd.json, ...),
+# none of which can be shipped here. Loader and driver ship from the same stack,
+# so the host's loader is the right one whenever it exists; the bundled copy
+# under usr/lib/vulkan exists only for hosts that have a driver but no loader
+# package. SDL_VULKAN_LIBRARY is SDL's hook for exactly this.
+if [ -n "${VOYAGERSP_BUNDLED_VULKAN:-}" ] && [ -f "$BUNDLED_VULKAN" ]; then
+    SDL_VULKAN_LIBRARY="$BUNDLED_VULKAN"
+    export SDL_VULKAN_LIBRARY
+elif ! ldconfig -p 2>/dev/null | grep -q 'libvulkan\.so\.1'; then
+    if [ -f "$BUNDLED_VULKAN" ]; then
+        say "no system libvulkan.so.1 — using the bundled loader"
+        SDL_VULKAN_LIBRARY="$BUNDLED_VULKAN"
+        export SDL_VULKAN_LIBRARY
+    else
+        say "warning: no Vulkan loader found; the renderer will fail to initialise"
+    fi
+fi
+
+# --------------------------------------------------------------- 3. data root
+mkdir -p "$DATA_ROOT" 2>/dev/null \
+    || die "cannot create the data root $DATA_ROOT (set VOYAGERSP_DATA_ROOT to a writable path)" 4
+[ -w "$DATA_ROOT" ] || die "the data root $DATA_ROOT is not writable" 4
+VOYAGERSP_DATA_ROOT="$DATA_ROOT"
+export VOYAGERSP_DATA_ROOT
+
+# --------------------------------------------------------------- 4. hand over
+# Arguments are forwarded verbatim: the engine owns --data-dir / --import /
+# --no-import / --import-from and everything else. The working directory is left
+# alone so relative paths given on the command line keep working.
+exec "$BIN" "$@"

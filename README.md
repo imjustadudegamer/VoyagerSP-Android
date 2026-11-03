@@ -61,7 +61,50 @@ No game data is included. You need your own copy of the retail game
 The manual push target (e.g. over adb) is
 `/sdcard/Android/obb/com.voyager.efsp/baseEF/`.
 
+## Linux
+
+The same tree builds a native desktop client — one source base, `EF_PLATFORM` selects the
+target at configure time, Vulkan remains the only renderer on both.
+
+**Requirements**
+
+- x86-64 Linux with a Vulkan driver.
+- glibc 2.35 or newer (`GLIBCXX_3.4.29`): Ubuntu 22.04+, Mint 21+, Debian 12+,
+  Fedora 36+, Arch/Manjaro/SteamOS 3. RHEL/Rocky 9, Debian 11 and musl distributions are
+  not supported.
+- X11 or XWayland. SDL is built with the X11 backend, so a pure Wayland session without
+  XWayland will not start a window.
+- Your own retail data, exactly as on Android.
+
+**Running the AppImage**
+
+```sh
+chmod +x VoyagerSP-1.2.0-x86_64.AppImage
+./VoyagerSP-1.2.0-x86_64.AppImage
+```
+
+On first run the game asks for your retail files (`pak0.pk3`–`pak3.pk3` and
+`efgamex86.dll`): pick the `BaseEF` folder of your installation, or pick the files
+individually. A folder is linked, not copied, so the 640 MB installation stays where it is;
+retail is only ever read, and saves/config live in your own data directory:
+
+```
+${XDG_DATA_HOME:-~/.local/share}/voyagersp/baseEF/     # saves, efspconfig.cfg, logs
+```
+
+Override the location with `VOYAGERSP_DATA_ROOT` or `--data-dir <path>`, and skip the
+prompt once the data is in place with `--no-import`. `--import-from <dir>` imports
+non-interactively, `--import-only` imports and exits.
+
+**Desktop controls**: keyboard and mouse use the retail bindings (WASD, mouse look,
+`MOUSE1` fire, `MOUSE2` forward, `MOUSE3` zoom, wheel cycles weapons); SDL game controllers
+are picked up hot-plugged with the same EF1 layout as the Android build. The video menu has
+a **FULL SCREEN** row that toggles between windowed (the default, 1280×720, resizable) and
+fullscreen; `r_fullscreen`, `--windowed` and `--fullscreen` do the same from the console or
+the command line.
+
 ## Known issues
+
 
 This port is over 90% complete, but has yet to be fully play tested. Known issues:
 
@@ -105,6 +148,36 @@ cd EFAndroid-SP
 The APK is universal (`armeabi-v7a` + `arm64-v8a`). Engine sources compiled into the APK
 live in `EFAndroid-SP/app/jni/efcode/` (lilium-voyager plus the Android/Vulkan port
 layer); the single-player game/UI module lives in `efgame/`.
+
+### Linux
+
+One tree, two targets: `EF_PLATFORM` (default `android` under the NDK toolchain, `linux`
+otherwise). On Linux the build links the *system* SDL2, Vulkan and FFmpeg instead of the
+vendored copies, and produces a normal executable instead of `libmain.so`:
+
+```sh
+# engine + client -> EFAndroid-SP/app/jni/build-linux/Release/voyagersp
+cmake -S EFAndroid-SP/app/jni -B EFAndroid-SP/app/jni/build-linux -G Ninja \
+      -DEF_PLATFORM=linux -DCMAKE_BUILD_TYPE=Release
+cmake --build EFAndroid-SP/app/jni/build-linux -j"$(nproc)"
+
+# game/UI modules -> Release/libefgame.so, Release/libefui.so (dlopened at runtime)
+cmake -S efgame -B efgame/build-linux -G Ninja -DEF_PLATFORM=linux -DCMAKE_BUILD_TYPE=Release
+cmake --build efgame/build-linux -j"$(nproc)"
+cp efgame/build-linux/Release/lib*.so EFAndroid-SP/app/jni/build-linux/Release/
+
+./scripts/play_voyagersp.sh          # or run Release/voyagersp directly
+```
+
+Host packages: `cmake`, `ninja`, `libsdl2-dev`, `libvulkan-dev`, `libavformat-dev`,
+`libavcodec-dev`, `libswscale-dev`, `libavutil-dev`. The AppImage is built from an
+unprivileged Ubuntu 22.04 rootfs so the glibc floor stays at 2.35:
+
+```sh
+cd packaging/appimage
+./setup-buildbox.sh        # once: rootfs + pinned tools, no sudo
+./build-appimage.sh        # dist/VoyagerSP-<version>-x86_64.AppImage
+```
 
 ## License & credits
 
