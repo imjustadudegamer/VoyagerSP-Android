@@ -14,7 +14,11 @@ import android.util.Log;
 
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.BufferedReader;
 import java.io.FileOutputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
 import java.io.InputStream;
 import java.io.OutputStream;
 
@@ -43,6 +47,9 @@ public class ImportActivity extends Activity {
     };
     /** A genuine retail DLL must accompany the paks as proof of ownership. */
     private static final String REQUIRED_DLL = "efgamex86.dll";
+    /** Config the engine execs before it resolves the renderer module. */
+    private static final String CONFIG_NAME = "efspconfig.cfg";
+    private static final String RENDERER_CVAR = "cl_renderer";
 
     private File mBaseEFDir;
 
@@ -60,7 +67,7 @@ public class ImportActivity extends Activity {
         mBaseEFDir.mkdirs();
 
         if (allRequiredPresent()) {
-            launchGame();
+            askRendererThenLaunch();
         } else {
             showImportDialog(null);
         }
@@ -117,6 +124,119 @@ public class ImportActivity extends Activity {
             sb.append(REQUIRED_DLL);
         }
         return sb.toString();
+    }
+
+    /**
+     * First-run renderer choice.
+     *
+     * The renderer is a module the engine loads once at startup, so this is the
+     * only moment the choice can take effect immediately: it is made here, before
+     * EFActivity starts the engine, and written to the config the engine reads
+     * before it resolves the module. Afterwards the setting lives where it always
+     * did - Settings -> Video -> Renderer - and needs a restart to change.
+     *
+     * Asked once: if the config already names a renderer, the game starts.
+     */
+    private void askRendererThenLaunch() {
+        if (rendererAlreadyChosen()) {
+            launchGame();
+            return;
+        }
+
+        AlertDialog.Builder b = new AlertDialog.Builder(this);
+        b.setTitle("Renderer");
+        b.setMessage("This build has two renderers. Vulkan is the default and the one"
+                + " the game has been tuned for; OpenGL ES 3.2 is an alternative for"
+                + " devices where Vulkan misbehaves.\n\n"
+                + "The choice applies to this launch. You can change it later in"
+                + " Settings -> Video -> Renderer (it takes effect the next time the"
+                + " game starts).");
+        b.setCancelable(false);
+        b.setPositiveButton("Vulkan (default)", new DialogInterface.OnClickListener() {
+            @Override
+            public void onClick(DialogInterface dialog, int which) {
+                writeRendererChoice("vulkan");
+                launchGame();
+            }
+        });
+        b.setNegativeButton("OpenGL ES 3.2", new DialogInterface.OnClickListener() {
+            @Override
+            public void onClick(DialogInterface dialog, int which) {
+                writeRendererChoice("gles3");
+                launchGame();
+            }
+        });
+        b.show();
+    }
+
+    /** True when the archived config already carries a renderer choice. */
+    private boolean rendererAlreadyChosen() {
+        BufferedReader r = null;
+        try {
+            r = new BufferedReader(new InputStreamReader(
+                    new FileInputStream(new File(mBaseEFDir, CONFIG_NAME)), "UTF-8"));
+            String line;
+            while ((line = r.readLine()) != null) {
+                String t = line.trim();
+                if (t.startsWith("//") || t.startsWith("#")) {
+                    continue;
+                }
+                if (t.startsWith("seta ") || t.startsWith("set ") || t.startsWith("seta\t")) {
+                    String rest = t.substring(t.indexOf(' ') + 1).trim();
+                    if (rest.startsWith(RENDERER_CVAR)) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // no config yet: first run
+        } finally {
+            if (r != null) try { r.close(); } catch (Exception ignored) {}
+        }
+        return false;
+    }
+
+    /**
+     * Rewrite the config with the chosen renderer. The engine execs this file
+     * before it resolves the renderer module, so the choice is live on this
+     * launch; the write is atomic (temp + rename) so a kill cannot leave a
+     * half-written config.
+     */
+    private void writeRendererChoice(String name) {
+        File cfg = new File(mBaseEFDir, CONFIG_NAME);
+        File tmp = new File(mBaseEFDir, CONFIG_NAME + ".tmp");
+        BufferedReader r = null;
+        PrintWriter w = null;
+        boolean ok = false;
+        try {
+            r = cfg.isFile()
+                    ? new BufferedReader(new InputStreamReader(new FileInputStream(cfg), "UTF-8"))
+                    : null;
+            w = new PrintWriter(new OutputStreamWriter(new FileOutputStream(tmp), "UTF-8"));
+            String line;
+            if (r != null) {
+                while ((line = r.readLine()) != null) {
+                    String t = line.trim();
+                    if ((t.startsWith("seta ") || t.startsWith("set "))
+                            && t.substring(t.indexOf(' ') + 1).trim().startsWith(RENDERER_CVAR)) {
+                        continue;   // superseded by the line written below
+                    }
+                    w.println(line);
+                }
+            }
+            w.println("seta " + RENDERER_CVAR + " \"" + name + "\"");
+            w.flush();
+            ok = !w.checkError();
+        } catch (Exception e) {
+            Log.e(TAG, "could not write renderer choice", e);
+        } finally {
+            if (r != null) try { r.close(); } catch (Exception ignored) {}
+            if (w != null) w.close();
+        }
+        if (!ok || !tmp.renameTo(cfg)) {
+            tmp.delete();
+            Log.w(TAG, "renderer choice not persisted; the game will use its default");
+        }
     }
 
     private void launchGame() {
@@ -258,7 +378,7 @@ public class ImportActivity extends Activity {
                         if (fError != null) {
                             showImportDialog(fError);
                         } else if (allRequiredPresent()) {
-                            launchGame();
+                            askRendererThenLaunch();
                         } else {
                             showImportDialog("Some required files are still missing.");
                         }
