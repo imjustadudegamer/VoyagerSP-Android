@@ -17,7 +17,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <time.h>
-#include <android/log.h>
+#include "sp_log.h"               // logcat on Android, stderr on Linux
 
 // Save-game description typed in the EF Save menu (set by UII_SG_StoreSaveGameComment,
 // sp_ui_bridge.cpp). SP_SaveGame writes it into the COMM chunk so the Load list shows a name.
@@ -25,7 +25,7 @@ extern char g_spSaveComment[128];
 
 // Com_Printf/Com_Error come via the C shim (SP headers declare them C++-linkage).
 extern "C" { void (*SP_ComPrintf(void))(const char*,...); void SP_ComError(int,const char*,...); }
-static void blog( const char *fmt, ... ){ va_list a; va_start(a,fmt); __android_log_vprint(ANDROID_LOG_INFO,"EFSP",fmt,a); va_end(a); }
+static void blog( const char *fmt, ... ){ va_list a; va_start(a,fmt); SP_LogLineV(SP_LOG_INFO,"EFSP",fmt,a); va_end(a); }
 
 // ---- lilium engine services (resolved at link against the engine objects) ----
 extern "C" {

@@ -70,6 +70,17 @@ set(SYS_SRC
 # sys_main.c compiled separately so we can rename main -> SDL_main
 set(SYS_MAIN ${EF}/sys/sys_main.c)
 
+# ---- x86-64 host: the SSE inline-asm helpers ----
+# q_shared.h's idx64 branch maps Q_ftol/Q_SnapVector/Q_VMftol to qftolsse/qsnapvectorsse/
+# qvmftolsse (round-to-nearest, ELITEFORCE flavour) instead of the portable lrintf path.
+# Those live in asm/ftola.c + asm/snapvector.c, which the ARM/Ndk builds never compile
+# (the whole file is #if defined(__i386__) || defined(__x86_64__)). Upstream ioquake3
+# adds exactly these two for x86_64; the .asm JIT files stay out (NO_VM_COMPILED).
+if(NOT EF_PLATFORM STREQUAL "android" AND
+   CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64|x86_64-.*)$")
+  list(APPEND SYS_SRC ${EF}/asm/ftola.c ${EF}/asm/snapvector.c)
+endif()
+
 # ---- renderer: VULKAN-ONLY (Quake3e renderervk port — kills the Mali pipeline-revalidation panning
 #      stutter). The dead OpenGL trees (renderergl1/renderergl2) were stripped: this SP port and the HM
 #      port (renderervk + renderercommon only) both ship Vulkan exclusively.
@@ -106,25 +117,50 @@ target_compile_options(sp_game_bridge PRIVATE
   -include ${EFG}/android/ef_android_compat.h -fno-threadsafe-statics -fcommon -w)
 target_compile_definitions(sp_game_bridge PRIVATE NDEBUG)
 
-add_library(main SHARED
+# ---- target: libmain.so (Android) or voyagersp (Linux) — identical sources ----
+set(EF_TARGET_SRC
   ${CLIENT_SRC} ${QCOMMON_SRC} ${SERVER_SRC} ${BOTLIB_SRC}
   ${SDL_SRC} ${SYS_SRC} ${SYS_MAIN}
   ${RENDERER_SRC} ${RENDERCOMMON_SRC} ${GLSL_SRC}
   ${ZLIB_SRC} ${JPEG_SRC} ${LIBMAD_SRC}
   ${CMAKE_CURRENT_SOURCE_DIR}/../sp/sp_integration.c
+  # Desktop retail-data importer (Android is a no-op stub: ImportActivity
+  # owns that flow on the APK side).  Kept in the shared source list so both
+  # targets always compile the same tree.
+  ${CMAKE_CURRENT_SOURCE_DIR}/../sp/data_import.c
   ${CMAKE_CURRENT_SOURCE_DIR}/../sp/bink_ff.c)
 
-# Rename sys_main.c's main() to SDL_main() so SDLActivity's bootstrap calls it.
-set_source_files_properties(${SYS_MAIN} PROPERTIES COMPILE_DEFINITIONS "main=SDL_main")
+if(EF_PLATFORM STREQUAL "android")
+  add_library(main SHARED ${EF_TARGET_SRC})
+  set(EF_TARGET main)
+  # Rename sys_main.c's main() to SDL_main() so SDLActivity's bootstrap calls it.
+  set_source_files_properties(${SYS_MAIN} PROPERTIES COMPILE_DEFINITIONS "main=SDL_main")
+  set(EF_ARCH_STRING "${CMAKE_ANDROID_ARCH_ABI}")
+else()
+  add_executable(voyagersp ${EF_TARGET_SRC})
+  set(EF_TARGET voyagersp)
+  set(EF_ARCH_STRING "x86_64")
+  # Desktop: the binary lands in <build>/Release/ beside the game modules, the
+  # layout the launcher script expects (same shape as Provenance EF2's).
+  set_target_properties(voyagersp PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Release)
+endif()
 
-target_include_directories(main PRIVATE
+target_include_directories(${EF_TARGET} PRIVATE
   ${EF} ${EF}/zlib ${EF}/jpeg-8c ${EF}/AL
   ${EF}/libmad-0.15.1b ${EF}/libmad-0.15.1b/include
-  ${CMAKE_CURRENT_SOURCE_DIR}/../SDL/include
-  ${CMAKE_CURRENT_SOURCE_DIR}/../sp
-  ${CMAKE_CURRENT_SOURCE_DIR}/../ffmpeg/include)
+  ${CMAKE_CURRENT_SOURCE_DIR}/../sp)
 
-target_compile_definitions(main PRIVATE
+# SDL + FFmpeg headers: vendored (Android) or the system copies (Linux).
+if(EF_PLATFORM STREQUAL "android")
+  target_include_directories(${EF_TARGET} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../SDL/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ffmpeg/include)
+else()
+  target_include_directories(${EF_TARGET} PRIVATE ${SDL2_INCLUDE_DIRS})
+endif()
+
+target_compile_definitions(${EF_TARGET} PRIVATE
   ELITEFORCE
   BOTLIB
   # MP3 voice-over: register the libmad-backed mp3 codec (snd_codec.c) and build
@@ -136,13 +172,17 @@ target_compile_definitions(main PRIVATE
   USE_FLEXIBLE_DISPLAY=1
   USE_OPENAL USE_OPENAL_DLOPEN
   PRODUCT_VERSION="1.40"
-  ARCH_STRING="${CMAKE_ANDROID_ARCH_ABI}"
-  # Game data lives in the app's OBB directory (standard Android home for big
-  # game data; accessible by the app without any storage permission).
-  ANDROID_DATA_ROOT="/sdcard/Android/obb/com.voyager.efsp"
+  ARCH_STRING="${EF_ARCH_STRING}"
   USE_LOCAL_HEADERS=1)
 
-target_compile_options(main PRIVATE
+if(EF_PLATFORM STREQUAL "android")
+  # Game data lives in the app's OBB directory (standard Android home for big
+  # game data; accessible by the app without any storage permission).
+  target_compile_definitions(${EF_TARGET} PRIVATE
+    ANDROID_DATA_ROOT="/sdcard/Android/obb/com.voyager.efsp")
+endif()
+
+target_compile_options(${EF_TARGET} PRIVATE
   # Implicit declarations are errors: a function implicitly declared as int
   # whose real return type is float or a pointer makes callers read the wrong
   # register (an undeclared Q_atof in renderervk corrupted every parsed shader
@@ -153,26 +193,50 @@ target_compile_options(main PRIVATE
   # backend are murderously slow at -O0, which is the panning-lag bottleneck.
   -O2 -fomit-frame-pointer)
 
-find_library(GLES2_LIB GLESv2)
-find_library(GLES3_LIB GLESv3)
-find_library(LOG_LIB log)
+if(EF_PLATFORM STREQUAL "android")
+  find_library(GLES2_LIB GLESv2)
+  find_library(GLES3_LIB GLESv3)
+  find_library(LOG_LIB log)
 
-# FFmpeg (minimal: Bink video/audio only) for EF1 SP .bik movie playback.
-# --start-group avoids static-lib ordering issues; zlib symbols come from the
-# engine's own bundled zlib (do not also link system z -> duplicate symbols).
-# Per-ABI FFmpeg static libs: armv7 in ffmpeg/lib (build_ffmpeg_arm.sh), arm64 in
-# ffmpeg/lib64 (build_ffmpeg_arm64.sh). Headers (ffmpeg/include) are arch-independent.
-if(CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
-  set(FFLIB ${CMAKE_CURRENT_SOURCE_DIR}/../ffmpeg/lib64)
+  # FFmpeg (minimal: Bink video/audio only) for EF1 SP .bik movie playback.
+  # --start-group avoids static-lib ordering issues; zlib symbols come from the
+  # engine's own bundled zlib (do not also link system z -> duplicate symbols).
+  # Per-ABI FFmpeg static libs: armv7 in ffmpeg/lib (build_ffmpeg_arm.sh), arm64 in
+  # ffmpeg/lib64 (build_ffmpeg_arm64.sh). Headers (ffmpeg/include) are arch-independent.
+  if(CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
+    set(FFLIB ${CMAKE_CURRENT_SOURCE_DIR}/../ffmpeg/lib64)
+  else()
+    set(FFLIB ${CMAKE_CURRENT_SOURCE_DIR}/../ffmpeg/lib)
+  endif()
+  set(FFMPEG_LIBS
+    -Wl,--start-group
+    ${FFLIB}/libavformat.a
+    ${FFLIB}/libavcodec.a
+    ${FFLIB}/libswscale.a
+    ${FFLIB}/libavutil.a
+    -Wl,--end-group)
+
+  target_link_libraries(${EF_TARGET} sp_game_bridge SDL2 ${GLES3_LIB} ${GLES2_LIB} EGL ${LOG_LIB} ${log_lib} ${FFMPEG_LIBS} dl m)
 else()
-  set(FFLIB ${CMAKE_CURRENT_SOURCE_DIR}/../ffmpeg/lib)
-endif()
-set(FFMPEG_LIBS
-  -Wl,--start-group
-  ${FFLIB}/libavformat.a
-  ${FFLIB}/libavcodec.a
-  ${FFLIB}/libswscale.a
-  ${FFLIB}/libavutil.a
-  -Wl,--end-group)
+  # ---- Linux substrate ----
+  # Vulkan is statically linked into the client (no USE_RENDERER_DLOPEN): the
+  # renderervk sources are part of the executable, exactly as on Android.
+  find_package(Vulkan REQUIRED)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(AVCODEC REQUIRED IMPORTED_TARGET
+    libavformat libavcodec libswscale libavutil)
 
-target_link_libraries(main sp_game_bridge SDL2 ${GLES3_LIB} ${GLES2_LIB} EGL ${LOG_LIB} ${log_lib} ${FFMPEG_LIBS} dl m)
+  target_link_libraries(${EF_TARGET} PRIVATE
+    sp_game_bridge
+    SDL2::SDL2
+    Vulkan::Vulkan
+    PkgConfig::AVCODEC
+    dl m pthread)
+
+  # The SP game modules are dlopen'd by name ("libefgame.so") from the working
+  # directory / LD_LIBRARY_PATH; keep the rpath to the build dir so a bare
+  # ./voyagersp from Release/ finds them without an install step.
+  set_target_properties(voyagersp PROPERTIES
+    BUILD_RPATH "$ORIGIN"
+    INSTALL_RPATH "$ORIGIN")
+endif()

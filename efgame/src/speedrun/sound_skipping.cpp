@@ -2,6 +2,15 @@
 
 #include "../game/g_local.h"
 
+// std::find. The .cpp is force-included with ef_android_compat.h, whose `rand()` macro
+// (15-bit Windows semantics) would also rewrite std::rand() inside libstdc++'s
+// <bits/stl_algo.h> into a nonexistent std::ef_rand15(). libc++ (the Android NDK one)
+// never needs that include, so only the desktop/GCC build sees it: take the macro out
+// of the way for this one header.
+#pragma push_macro("rand")
+#undef rand
+#include <algorithm>
+#pragma pop_macro("rand")
 #include <filesystem>
 #include <string>
 #include <string_view>

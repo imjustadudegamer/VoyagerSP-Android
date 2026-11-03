@@ -1,5 +1,12 @@
 // sp_integration.c — HM-side glue: the SPR_* renderer wrappers (call the HM `re` refexport),
 // the `spmap` console command, and SP-mode state. Compiled with the HM engine headers.
+//
+// Dl_info/dladdr (the crash backtrace below) are guarded by __USE_GNU on glibc but exported
+// unconditionally by bionic, so the desktop build needs _GNU_SOURCE before any libc header.
+// This must stay the first thing in the file (a define after an include has no effect).
+#if !defined( __ANDROID__ ) && !defined( _GNU_SOURCE )
+#	define _GNU_SOURCE
+#endif
 #include "../efcode/qcommon/q_shared.h"
 #include "../efcode/qcommon/qcommon.h"
 #include "../efcode/renderercommon/tr_types.h"
@@ -10,7 +17,7 @@
 #include <signal.h>
 #include <unwind.h>
 #include <dlfcn.h>
-#include <android/log.h>
+#include "sp_log.h"     // logcat on Android, stderr on Linux (crash backtrace channel)
 
 extern refexport_t re;        // the HM renderer (set up by the HM CL_InitRef)
 
@@ -31,18 +38,18 @@ void SP_LogBacktrace(int sig){
     void *buf[40]; struct sp_bt s = { buf, buf+40 };
     _Unwind_Backtrace(sp_bt_cb, &s);
     int n = (int)(s.cur - buf);
-    __android_log_print(ANDROID_LOG_ERROR, "crash", "*** SIGNAL %d  (%d frames) ***", sig, n);
+    SP_LogE("crash", "*** SIGNAL %d  (%d frames) ***", sig, n);
     for(int i=0;i<n;i++){
         Dl_info info;
         if(dladdr(buf[i], &info) && info.dli_sname)
-            __android_log_print(ANDROID_LOG_ERROR, "crash", "  #%02d  %s + 0x%lx  [%s]", i,
+            SP_LogE("crash", "  #%02d  %s + 0x%lx  [%s]", i,
                 info.dli_sname, (unsigned long)((char*)buf[i]-(char*)info.dli_saddr),
                 info.dli_fname?info.dli_fname:"?");
         else if(dladdr(buf[i], &info) && info.dli_fbase)
-            __android_log_print(ANDROID_LOG_ERROR, "crash", "  #%02d  %p  [%s + 0x%lx]", i, buf[i],
+            SP_LogE("crash", "  #%02d  %p  [%s + 0x%lx]", i, buf[i],
                 info.dli_fname?info.dli_fname:"?", (unsigned long)((char*)buf[i]-(char*)info.dli_fbase));
         else
-            __android_log_print(ANDROID_LOG_ERROR, "crash", "  #%02d  %p  ?", i, buf[i]);
+            SP_LogE("crash", "  #%02d  %p  ?", i, buf[i]);
     }
 }
 void SP_InstallCrashHandler(void){ /* engine's Sys_SigHandler calls SP_LogBacktrace directly */ }
@@ -398,7 +405,11 @@ void SP_DropHM_Activate(void){
     // libmain static that the engine's key-clear doesn't touch, so a level entered while crouch-toggled would
     // invert the first CROUCH tap on the new map. (Touch fingers are released by IN_TouchReset on finger-up;
     // this covers the cross-transition carry the audit flagged.)
+#ifdef __ANDROID__
+    // Touch-only: tc_crouchToggled is a static inside sdl_input.c's __ANDROID__ block (the
+    // on-screen crouch button), so the desktop build has no sticky toggle to clear.
     { extern void IN_ClearCrouchToggle(void); IN_ClearCrouchToggle(); }
+#endif
 }
 
 // ---- load-failure recovery + watchdog (fixes the intermittent "load black screen") ----

@@ -18,12 +18,27 @@
 #include "libavutil/imgutils.h"
 #include "libswscale/swscale.h"
 
+// ---------------------------------------------------------------------------
+// FFmpeg version policy: this file must build against libavcodec 58
+// (FFmpeg 4.4, Ubuntu 22.04) and newer; a newer FFmpeg must never be
+// required.  The API used here is otherwise unchanged across that range:
+//   avio_alloc_context / avio_context_free / av_freep
+//   avformat_alloc_context / open_input / find_stream_info / close_input
+//   avcodec_find_decoder / alloc_context3 / parameters_to_context / open2
+//   avcodec_send_packet / avcodec_receive_frame / flush_buffers
+//   av_frame_alloc / av_packet_alloc / av_packet_unref
+//   av_guess_frame_rate / av_sample_fmt_is_planar / sws_getContext
+// The one incompatible change is the audio channel count: FFmpeg 5.1
+// (libavcodec 59.24) replaced AVCodecContext.channels with
+// AVCodecContext.ch_layout.nb_channels.  Guarded where it is read below.
+// ---------------------------------------------------------------------------
+
 #ifdef BINK_HOST_TEST
 #include <stdio.h>
 #define BLOG(...) do { printf( "[bink] " __VA_ARGS__ ); printf( "\n" ); } while (0)
 #else
-#include <android/log.h>
-#define BLOG(...) __android_log_print( ANDROID_LOG_INFO, "bink", __VA_ARGS__ )
+#include "sp_log.h"                        // logcat on Android, stderr on Linux
+#define BLOG(...) SP_LogI( "bink", __VA_ARGS__ )
 #endif
 
 // engine services (resolved at link time in the main .so)
@@ -197,7 +212,14 @@ int Bink_Open( int handle, const char *name, int *outW, int *outH ) {
 static void bink_emit_audio( binkHandle_t *b ) {
     static int16_t s16[8 * 4096];
     AVFrame *f = b->aframe;
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(59, 24, 100)
+    // FFmpeg 5.1+ / libavcodec 59.24: AVCodecContext.ch_layout replaced the
+    // old channels / channel_layout pair.
     int ch = b->adec->ch_layout.nb_channels;
+#else
+    // FFmpeg 4.4 (Ubuntu 22.04, libavcodec 58) and older.
+    int ch = b->adec->channels;
+#endif
     int ns = f->nb_samples;
     if ( ch < 1 ) ch = 1;
     if ( ns < 1 || ns * ch > (int)( sizeof( s16 ) / sizeof( s16[0] ) ) ) return;
