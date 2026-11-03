@@ -253,7 +253,20 @@ static void R_ClearSymTables( void )
 
 // for modular renderer
 #ifdef USE_RENDERER_DLOPEN
-void QDECL Com_Error( errorParm_t code, const char *fmt, ... )
+// The client's module probe lists a backend in cl_rendererModules only when the
+// module reports its drawing backend as complete (see CL_RendererModuleReady).
+// The Vulkan backend is complete; the GLES module answers 0 while its backend
+// is unfinished, so the UI never offers it.
+Q_EXPORT int renderer_backend_ready( void )
+{
+	return 1;
+}
+
+// q_shared.h declares Com_Error( int level, ... ), and the engine's own
+// implementation takes the int form; this shim was never compiled until the
+// renderer became a module, and used the errorParm_t spelling, which is a
+// conflicting declaration (enum vs int) under -Werror. int it is.
+void QDECL Com_Error( int code, const char *fmt, ... )
 {
 	char buf[ 4096 ];
 	va_list	argptr;
@@ -527,6 +540,16 @@ static void InitOpenGL( void )
 	if ( glConfig.vidWidth == 0 )
 	{
 #ifdef USE_VULKAN
+#ifdef USE_GLES3_BACKEND
+		// GLES 3.2 backend: the window and context belong to the renderer
+		// module (ri.VKimp_* is the client's Vulkan window layer and must not
+		// be used here). Same contract otherwise: fill glConfig, then let
+		// vk_initialize() -- this backend's GL object setup -- run below.
+		if ( !GL3_PlatformInit( &glConfig ) )
+		{
+			ri.Error( ERR_FATAL, "GLES3: could not create a GLES 3.2 context" );
+		}
+#else
 		if ( !ri.VKimp_Init )
 		{
 			ri.Error( ERR_FATAL, "Vulkan interface is not initialized" );
@@ -534,6 +557,7 @@ static void InitOpenGL( void )
 
 		// This function is responsible for initializing a valid Vulkan subsystem.
 		ri.VKimp_Init( &glConfig );
+#endif // USE_GLES3_BACKEND
 
 		gls.windowWidth = glConfig.vidWidth;
 		gls.windowHeight = glConfig.vidHeight;

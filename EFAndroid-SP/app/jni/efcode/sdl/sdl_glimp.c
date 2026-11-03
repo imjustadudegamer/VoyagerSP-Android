@@ -48,6 +48,21 @@ typedef enum
 SDL_Window *SDL_window = NULL;
 static SDL_GLContext SDL_glContext = NULL;
 
+#ifdef USE_VULKAN
+/*
+ * The window/surface layer lives in the client but is driven by the renderer
+ * through refimport_t (ri.VKimp_*). The client's import table is a local in
+ * CL_InitRef() and the renderer may be a loadable module, so the client installs
+ * a copy for this whole layer with VKimp_SetImports() before GetRefAPI().
+ * window_ri is that copy (and plain `ri` in a GL build, which has no module).
+ */
+static refimport_t vkimp_ri;
+void VKimp_SetImports( const refimport_t *imp ) { vkimp_ri = *imp; }
+#define window_ri vkimp_ri
+#else
+#define window_ri ri
+#endif
+
 cvar_t *r_allowSoftwareGL; // Don't abort out if a hardware visual can't be obtained
 cvar_t *r_allowResize; // make window resizable
 cvar_t *r_centerWindow;
@@ -81,6 +96,7 @@ QGL_ARB_vertex_array_object_PROCS;
 QGL_EXT_direct_state_access_PROCS;
 #undef GLE
 
+#ifndef USE_VULKAN
 /*
 ===============
 GLimp_Shutdown
@@ -115,7 +131,6 @@ void GLimp_LogComment( char *comment )
 {
 }
 
-#ifndef USE_VULKAN
 // GL/GLES window/context/mode-setting path, unused in the Vulkan build (window via
 // VKimp_Init, present via vk_present_frame). Guarded out so it doesn't reference
 // GL-only cvars the Vulkan renderer never registers.
@@ -907,7 +922,10 @@ static qboolean GLimp_StartDriverAndSetMode(int mode, qboolean fullscreen, qbool
 #endif // !USE_VULKAN
 
 
-#ifdef USE_FLEXIBLE_DISPLAY
+// GLimp_ResizeWindow writes the renderer's glConfig, which lives in the renderer
+// module when the renderer is dlopen'ed -- so it only exists in a static build.
+// It is currently never installed as re.ResizeWindow, so nothing regresses.
+#if defined( USE_FLEXIBLE_DISPLAY ) && !defined( USE_RENDERER_DLOPEN )
 /*
 ===============
 GLimp_ResizeWindow
@@ -1282,6 +1300,12 @@ void GLimp_EndFrame( void )
 ===========================================================================
 SDL Vulkan platform layer for the renderervk (Vulkan) port. The renderer is
 GL-free: it creates an SDL_WINDOW_VULKAN window and a VkSurfaceKHR via SDL.
+
+The renderer calls these functions through refimport_t (ri.VKimp_*), but the
+client's import table is a local in CL_InitRef() and the renderer may be a
+loadable module, so the client installs a copy for this layer with
+VKimp_SetImports() before GetRefAPI(). Only the Printf/Error/Cvar/IN entries
+are used here.
 ===========================================================================
 */
 #include <SDL_vulkan.h>
@@ -1305,17 +1329,17 @@ void VKimp_Init( glconfig_t *config )
 	Uint32 winFlags;
 #endif
 
-	ri.Printf( PRINT_ALL, "VKimp_Init( )\n" );
+	vkimp_ri.Printf( PRINT_ALL, "VKimp_Init( )\n" );
 
 	SDL_SetHint( SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight" );
 
 	if ( !SDL_WasInit( SDL_INIT_VIDEO ) ) {
 		if ( SDL_Init( SDL_INIT_VIDEO ) != 0 )
-			ri.Error( ERR_FATAL, "VKimp_Init: SDL_Init(VIDEO) failed: %s", SDL_GetError() );
+			vkimp_ri.Error( ERR_FATAL, "VKimp_Init: SDL_Init(VIDEO) failed: %s", SDL_GetError() );
 	}
 
 	if ( SDL_Vulkan_LoadLibrary( NULL ) != 0 )
-		ri.Error( ERR_FATAL, "VKimp_Init: SDL_Vulkan_LoadLibrary failed: %s", SDL_GetError() );
+		vkimp_ri.Error( ERR_FATAL, "VKimp_Init: SDL_Vulkan_LoadLibrary failed: %s", SDL_GetError() );
 
 	if ( SDL_GetDesktopDisplayMode( 0, &dm ) != 0 ) { dm.w = 1280; dm.h = 720; dm.refresh_rate = 60; }
 
@@ -1325,7 +1349,7 @@ void VKimp_Init( glconfig_t *config )
 		SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, dm.w, dm.h,
 		SDL_WINDOW_SHOWN | SDL_WINDOW_VULKAN | SDL_WINDOW_FULLSCREEN );
 	if ( !SDL_window )
-		ri.Error( ERR_FATAL, "VKimp_Init: SDL_CreateWindow(VULKAN) failed: %s", SDL_GetError() );
+		vkimp_ri.Error( ERR_FATAL, "VKimp_Init: SDL_CreateWindow(VULKAN) failed: %s", SDL_GetError() );
 	config->isFullscreen = qtrue;
 #else
 	/*
@@ -1335,14 +1359,14 @@ void VKimp_Init( glconfig_t *config )
 	 * --fullscreen flag (delivered as +set r_fullscreen 1).
 	 */
 	{
-		cvar_t *r_fullscreen_cv   = ri.Cvar_Get( "r_fullscreen",   "0", CVAR_ARCHIVE );
-		cvar_t *vid_fullscreen_cv = ri.Cvar_Get( "vid_fullscreen", "0", CVAR_ARCHIVE );
-		cvar_t *allow_resize_cv   = ri.Cvar_Get( "r_allowResize",  "1", CVAR_ARCHIVE );
-		cvar_t *center_window_cv  = ri.Cvar_Get( "r_centerWindow", "1", CVAR_ARCHIVE );
+		cvar_t *r_fullscreen_cv   = vkimp_ri.Cvar_Get( "r_fullscreen",   "0", CVAR_ARCHIVE );
+		cvar_t *vid_fullscreen_cv = vkimp_ri.Cvar_Get( "vid_fullscreen", "0", CVAR_ARCHIVE );
+		cvar_t *allow_resize_cv   = vkimp_ri.Cvar_Get( "r_allowResize",  "1", CVAR_ARCHIVE );
+		cvar_t *center_window_cv  = vkimp_ri.Cvar_Get( "r_centerWindow", "1", CVAR_ARCHIVE );
 
-		ri.Cvar_Get( "r_customwidth",  "1280", CVAR_ARCHIVE );
-		ri.Cvar_Get( "r_customheight", "720",  CVAR_ARCHIVE );
-		ri.Cvar_Get( "r_mode",         "-1",   CVAR_ARCHIVE );
+		vkimp_ri.Cvar_Get( "r_customwidth",  "1280", CVAR_ARCHIVE );
+		vkimp_ri.Cvar_Get( "r_customheight", "720",  CVAR_ARCHIVE );
+		vkimp_ri.Cvar_Get( "r_mode",         "-1",   CVAR_ARCHIVE );
 
 		fullscreen = r_fullscreen_cv->integer != 0;
 
@@ -1351,14 +1375,14 @@ void VKimp_Init( glconfig_t *config )
 		   otherwise the two are kept in sync for the next boot. */
 		if ( vid_fullscreen_cv->integer && !fullscreen ) {
 			fullscreen = 1;
-			ri.Cvar_Set( "r_fullscreen", "1" );
+			vkimp_ri.Cvar_Set( "r_fullscreen", "1" );
 		} else if ( vid_fullscreen_cv->integer != fullscreen ) {
-			ri.Cvar_Set( "vid_fullscreen", fullscreen ? "1" : "0" );
+			vkimp_ri.Cvar_Set( "vid_fullscreen", fullscreen ? "1" : "0" );
 		}
 
-		mode = ri.Cvar_VariableIntegerValue( "r_mode" );
-		winW = ri.Cvar_VariableIntegerValue( "r_customwidth" );
-		winH = ri.Cvar_VariableIntegerValue( "r_customheight" );
+		mode = vkimp_ri.Cvar_VariableIntegerValue( "r_mode" );
+		winW = vkimp_ri.Cvar_VariableIntegerValue( "r_customwidth" );
+		winH = vkimp_ri.Cvar_VariableIntegerValue( "r_customheight" );
 
 		if ( mode == -2 ) {
 			/* native desktop size, still inside a normal window */
@@ -1388,10 +1412,10 @@ void VKimp_Init( glconfig_t *config )
 			( fullscreen || !center_window_cv->integer ) ? SDL_WINDOWPOS_UNDEFINED : SDL_WINDOWPOS_CENTERED,
 			winW, winH, winFlags );
 		if ( !SDL_window )
-			ri.Error( ERR_FATAL, "VKimp_Init: SDL_CreateWindow(VULKAN) failed: %s", SDL_GetError() );
+			vkimp_ri.Error( ERR_FATAL, "VKimp_Init: SDL_CreateWindow(VULKAN) failed: %s", SDL_GetError() );
 
 		config->isFullscreen = fullscreen ? qtrue : qfalse;
-		ri.Printf( PRINT_ALL, "VKimp_Init: %dx%d %s%s\n", winW, winH,
+		vkimp_ri.Printf( PRINT_ALL, "VKimp_Init: %dx%d %s%s\n", winW, winH,
 		           fullscreen ? "fullscreen" : "windowed",
 		           ( !fullscreen && ( winFlags & SDL_WINDOW_RESIZABLE ) ) ? ", resizable" : "" );
 	}
@@ -1412,12 +1436,12 @@ void VKimp_Init( glconfig_t *config )
 	Q_strncpyz( config->renderer_string, "Vulkan", sizeof( config->renderer_string ) );
 	Q_strncpyz( config->version_string,  "Vulkan", sizeof( config->version_string ) );
 
-	ri.IN_Init( SDL_window );
+	vkimp_ri.IN_Init( SDL_window );
 }
 
 void VKimp_Shutdown( qboolean unloadDLL )
 {
-	ri.IN_Shutdown();
+	vkimp_ri.IN_Shutdown();
 	if ( SDL_window ) { SDL_DestroyWindow( SDL_window ); SDL_window = NULL; }
 	if ( unloadDLL ) SDL_Vulkan_UnloadLibrary();
 	SDL_QuitSubSystem( SDL_INIT_VIDEO );
@@ -1497,7 +1521,7 @@ qboolean GLimp_SpawnRenderThread( void (*function)( void ) )
 
 	glimp_renderThread = SDL_CreateThread( GLimp_RenderThreadWrapper, "render", NULL );
 	if ( !glimp_renderThread ) {
-		ri.Printf( PRINT_WARNING, "SDL_CreateThread() returned %s\n", SDL_GetError() );
+		window_ri.Printf( PRINT_WARNING, "SDL_CreateThread() returned %s\n", SDL_GetError() );
 		glimp_smpData = NULL;
 		return qfalse;
 	}

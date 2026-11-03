@@ -81,17 +81,46 @@ if(NOT EF_PLATFORM STREQUAL "android" AND
   list(APPEND SYS_SRC ${EF}/asm/ftola.c ${EF}/asm/snapvector.c)
 endif()
 
-# ---- renderer: VULKAN-ONLY (Quake3e renderervk port — kills the Mali pipeline-revalidation panning
-#      stutter). The dead OpenGL trees (renderergl1/renderergl2) were stripped: this SP port and the HM
-#      port (renderervk + renderercommon only) both ship Vulkan exclusively.
-#      The old EF_RENDERER=gl2|vulkan switch + the gl2 fallback branch are gone — there is no GL renderer
-#      to fall back to. (renderercommon stays: renderervk's shared tr_*.c use its GL-enum/qgl compat.) ----
+# ---- renderers: modules selected at runtime by `cl_renderer` ----
+#
+# The renderer is not part of the client any more. It is a loadable module that
+# CL_InitRef() dlopen()s once, exactly like ioquake3/Quake3e and the author's
+# EF2 port: the engine keeps ioquake3's USE_RENDERER_DLOPEN machinery, and the
+# renderer fills a refexport_t from GetRefAPI() given the engine's refimport_t.
+#
+#   Linux   : Release/renderer_vulkan.so          (beside voyagersp; Sys_LoadDll
+#                                                    resolves it against Sys_BinaryPath)
+#   Android : lib/<abi>/librenderer_vulkan.so     (AGP packages every SHARED target
+#                                                    built from this project)
+#
+# A module cannot link the engine's qcommon, so it compiles the small shared
+# set below plus renderercommon/tr_subs.c (Com_* shims over refimport_t) -- the
+# same organisation as Quake3e/EF2 standalone renderers.
+#
+# EF_STATIC_RENDERER=ON folds the renderer back into the executable (a debug /
+# failsafe build with no dlopen); cl_renderer is then ignored.
+option(EF_STATIC_RENDERER "Link the Vulkan renderer into the client instead of building a module" OFF)
+
 file(GLOB RENDERCOMMON_SRC ${EF}/renderercommon/*.c)
-file(GLOB RENDERER_SRC ${EF}/renderervk/*.c)
-# tr_subs.c (standalone-DLL shims) excluded — statically linked
-list(REMOVE_ITEM RENDERER_SRC ${EF}/renderervk/tr_subs.c)
-# shader_data.c (prebuilt SPIR-V) is #included by vk.c — must NOT compile separately
-list(REMOVE_ITEM RENDERER_SRC ${EF}/renderervk/shaders/spirv/shader_data.c)
+file(GLOB RENDERER_VK_SRC ${EF}/renderervk/*.c)
+# tr_subs.c is the module shim (own target); shader_data.c (prebuilt SPIR-V) is
+# #included by vk.c and must never be compiled separately.
+list(REMOVE_ITEM RENDERER_VK_SRC
+  ${EF}/renderervk/tr_subs.c
+  ${EF}/renderervk/shaders/spirv/shader_data.c)
+
+# Shared code every renderer module needs (not reachable through refimport_t).
+# q_shared.c/q_math.c provide the Com_*/Q_* helpers, the math and the string
+# routines the tr_* sources call directly; ftola/snapvector are the x86-64
+# inline-asm Q_ftol/Q_SnapVector implementations q_shared.h selects with idx64.
+set(RENDERER_LIB_SRC
+  ${EF}/qcommon/q_shared.c
+  ${EF}/qcommon/q_math.c)
+if(NOT EF_PLATFORM STREQUAL "android" AND
+   CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64|x86_64-.*)$")
+  list(APPEND RENDERER_LIB_SRC ${EF}/asm/ftola.c ${EF}/asm/snapvector.c)
+endif()
+
 set(GLSL_SRC "")
 set(EF_USE_VULKAN TRUE)
 
@@ -121,7 +150,7 @@ target_compile_definitions(sp_game_bridge PRIVATE NDEBUG)
 set(EF_TARGET_SRC
   ${CLIENT_SRC} ${QCOMMON_SRC} ${SERVER_SRC} ${BOTLIB_SRC}
   ${SDL_SRC} ${SYS_SRC} ${SYS_MAIN}
-  ${RENDERER_SRC} ${RENDERCOMMON_SRC} ${GLSL_SRC}
+  ${GLSL_SRC}
   ${ZLIB_SRC} ${JPEG_SRC} ${LIBMAD_SRC}
   ${CMAKE_CURRENT_SOURCE_DIR}/../sp/sp_integration.c
   # Desktop retail-data importer (Android is a no-op stub: ImportActivity
@@ -129,6 +158,13 @@ set(EF_TARGET_SRC
   # targets always compile the same tree.
   ${CMAKE_CURRENT_SOURCE_DIR}/../sp/data_import.c
   ${CMAKE_CURRENT_SOURCE_DIR}/../sp/bink_ff.c)
+
+if(EF_STATIC_RENDERER)
+  # Failsafe/debug layout: the renderer is part of the client (no module, no
+  # dlopen). renderercommon is needed by renderervk's tr_* sources; tr_subs.c
+  # is NOT (the engine's qcommon supplies those Com_* entry points).
+  list(APPEND EF_TARGET_SRC ${RENDERER_VK_SRC} ${RENDERCOMMON_SRC})
+endif()
 
 if(EF_PLATFORM STREQUAL "android")
   add_library(main SHARED ${EF_TARGET_SRC})
@@ -169,6 +205,9 @@ target_compile_definitions(${EF_TARGET} PRIVATE
   $<$<NOT:$<BOOL:${EF_VM_JIT}>>:NO_VM_COMPILED>
   $<$<BOOL:${EF_USE_VULKAN}>:USE_VULKAN>
   $<$<BOOL:${EF_USE_VULKAN}>:USE_VULKAN_API>
+  # The renderer is a dlopen()ed module unless the failsafe static build is
+  # requested: the engine then loads it by cl_renderer and never links it.
+  $<$<NOT:$<BOOL:${EF_STATIC_RENDERER}>>:USE_RENDERER_DLOPEN>
   USE_FLEXIBLE_DISPLAY=1
   USE_OPENAL USE_OPENAL_DLOPEN
   PRODUCT_VERSION="1.40"
@@ -218,10 +257,10 @@ if(EF_PLATFORM STREQUAL "android")
 
   target_link_libraries(${EF_TARGET} sp_game_bridge SDL2 ${GLES3_LIB} ${GLES2_LIB} EGL ${LOG_LIB} ${log_lib} ${FFMPEG_LIBS} dl m)
 else()
-  # ---- Linux substrate ----
-  # Vulkan is statically linked into the client (no USE_RENDERER_DLOPEN): the
-  # renderervk sources are part of the executable, exactly as on Android.
-  find_package(Vulkan REQUIRED)
+  # no link-time Vulkan dependency anywhere: the engine talks to the window via
+  # SDL_Vulkan_* (SDL dlopens the loader itself) and the renderer resolves every
+  # entry point through ri.VK_GetInstanceProcAddr. Only its headers are needed,
+  # and those are vendored in renderercommon/vulkan/.
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(AVCODEC REQUIRED IMPORTED_TARGET
     libavformat libavcodec libswscale libavutil)
@@ -229,7 +268,6 @@ else()
   target_link_libraries(${EF_TARGET} PRIVATE
     sp_game_bridge
     SDL2::SDL2
-    Vulkan::Vulkan
     PkgConfig::AVCODEC
     dl m pthread)
 
@@ -239,4 +277,134 @@ else()
   set_target_properties(voyagersp PROPERTIES
     BUILD_RPATH "$ORIGIN"
     INSTALL_RPATH "$ORIGIN")
+endif()
+
+# ---------------------------------------------------------------------------
+# Renderer modules
+#
+# Each backend is a loadable module the client selects once, at CL_InitRef(),
+# from `cl_renderer` (default "vulkan"). The module exports GetRefAPI(); the
+# engine hands it the refimport_t and gets the refexport_t back. A module is
+# never linked against the client: it compiles its own qcommon maths and the
+# tr_subs.c Com_* shims, and resolves every Vulkan entry point dynamically.
+#
+# Names (agreed contract, mirrors EF2's selection path):
+#   Linux   : Release/renderer_vulkan.so
+#   Android : lib/<abi>/librenderer_vulkan.so   ("lib<name>.so" is what the
+#             Android packager accepts and what dlopen()s by bare name)
+# cl_renderer holds the bare backend name ("vulkan"), never the file name.
+# ---------------------------------------------------------------------------
+if(NOT EF_STATIC_RENDERER)
+  add_library(renderer_vulkan SHARED
+    ${RENDERER_VK_SRC}
+    ${RENDERCOMMON_SRC}
+    ${RENDERER_LIB_SRC}
+    ${EF}/qcommon/puff.c      # tr_image_png.c::R_LoadPNG uses the bundled inflate
+    ${JPEG_SRC})              # tr_image_jpg.c links its own jpeg decoder copy
+
+  # renderercommon/qgl.h still pulls SDL_opengl.h (the shared tr_image_*/tr_font
+  # code includes qgl.h for the GL enum compatibility layer), so the module
+  # needs the same SDL headers the client uses.
+  if(EF_PLATFORM STREQUAL "android")
+    target_include_directories(renderer_vulkan PRIVATE
+      ${EF} ${EF}/zlib ${EF}/jpeg-8c
+      ${CMAKE_CURRENT_SOURCE_DIR}/../SDL/include)
+  else()
+    target_include_directories(renderer_vulkan PRIVATE
+      ${EF} ${EF}/zlib ${EF}/jpeg-8c ${SDL2_INCLUDE_DIRS})
+  endif()
+
+  target_compile_definitions(renderer_vulkan PRIVATE
+    ELITEFORCE
+    USE_VULKAN
+    USE_RENDERER_DLOPEN
+    USE_FLEXIBLE_DISPLAY=1
+    USE_LOCAL_HEADERS=1
+    PRODUCT_VERSION="1.40"
+    ARCH_STRING="${EF_ARCH_STRING}")
+
+  # Same hardening as the client: an implicit int declaration of a float- or
+  # pointer-returning helper is a miscompiled read across the whole renderer
+  # (the Q_atof white-fog bug was exactly that), so make it an error here too.
+  target_compile_options(renderer_vulkan PRIVATE
+    -fno-strict-aliasing -fvisibility=hidden
+    -Werror=implicit-function-declaration
+    -O2 -fomit-frame-pointer)
+
+  if(EF_PLATFORM STREQUAL "android")
+    # librenderer_vulkan.so -- AGP packages every SHARED target of this project
+    # into the APK's lib/<abi>/ automatically.
+    set_target_properties(renderer_vulkan PROPERTIES PREFIX "lib")
+    target_link_libraries(renderer_vulkan PRIVATE m)
+  else()
+    # Release/renderer_vulkan.so beside voyagersp. Sys_LoadDll() resolves the
+    # bare file name against Sys_BinaryPath(), so no rpath entry is needed.
+    set_target_properties(renderer_vulkan PROPERTIES
+      PREFIX ""
+      LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Release)
+    target_link_libraries(renderer_vulkan PRIVATE dl m pthread)
+  endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# renderer_gles3 -- the second renderer module (GLES 3.2)
+#
+# Status: GL layer + GLSL are ported (AUDIT.md in that directory); the drawing
+# backend is not written yet, so the module reports renderer_backend_ready()=0.
+# It is still a real module target on both platforms so the layer stays
+# compiled, linked and loadable while the backend work lands. The client never
+# offers it (cl_rendererModules lists ready modules only) and loading it
+# manually makes the client fall back to Vulkan.
+#
+# Sources today: the EF2 GL entry-point loader, this engine's SDL/EGL-free GLES
+# context layer and the module entry point. It carries its own q_shared.c so it
+# has no link-time engine symbol, exactly like the Vulkan module.
+# ---------------------------------------------------------------------------
+set(RENDERER_GLES3_SRC
+  ${EF}/renderergles3/qgl_gles3.c
+  ${EF}/renderergles3/gl_gles3_platform.c
+  ${EF}/renderergles3/gl3_renderer.c
+  ${EF}/qcommon/q_shared.c)
+
+if(NOT EF_STATIC_RENDERER)
+  add_library(renderer_gles3 SHARED ${RENDERER_GLES3_SRC})
+
+  if(EF_PLATFORM STREQUAL "android")
+    target_include_directories(renderer_gles3 PRIVATE
+      ${EF} ${CMAKE_CURRENT_SOURCE_DIR}/../SDL/include)
+  else()
+    target_include_directories(renderer_gles3 PRIVATE
+      ${EF} ${SDL2_INCLUDE_DIRS})
+  endif()
+
+  # USE_VULKAN is required even though this backend has no Vulkan code: the
+  # engine compiles refexport_t/refimport_t (renderercommon/tr_public.h) with
+  # USE_VULKAN, which selects the Quake3e Cvar_CheckRange signature and the
+  # VKimp_* window slots. A module built without it would have a different
+  # struct layout than the client that fills it.
+  target_compile_definitions(renderer_gles3 PRIVATE
+    ELITEFORCE
+    USE_VULKAN
+    USE_RENDERER_DLOPEN
+    USE_FLEXIBLE_DISPLAY=1
+    USE_LOCAL_HEADERS=1
+    PRODUCT_VERSION="1.40"
+    ARCH_STRING="${EF_ARCH_STRING}")
+
+  target_compile_options(renderer_gles3 PRIVATE
+    -fno-strict-aliasing -fvisibility=hidden
+    -Werror=implicit-function-declaration
+    -O2 -fomit-frame-pointer)
+
+  if(EF_PLATFORM STREQUAL "android")
+    # librenderer_gles3.so, packaged by AGP from this target.
+    set_target_properties(renderer_gles3 PROPERTIES PREFIX "lib")
+    target_link_libraries(renderer_gles3 PRIVATE SDL2 m)
+  else()
+    # Release/renderer_gles3.so beside voyagersp.
+    set_target_properties(renderer_gles3 PROPERTIES
+      PREFIX ""
+      LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Release)
+    target_link_libraries(renderer_gles3 PRIVATE SDL2::SDL2 dl m pthread)
+  endif()
 endif()

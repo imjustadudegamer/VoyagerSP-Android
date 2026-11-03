@@ -895,6 +895,12 @@ void		Com_RunAndTimeServerPacket(netadr_t *evFrom, msg_t *buf);
 qboolean	Com_IsVoipTarget(uint8_t *voipTargets, int voipTargetsSize, int clientNum);
 
 void		Com_StartupVariable( const char *match );
+
+// Write the archived cvar set to a config file in the home path (the same
+// routine `writeconfig <file>` and Com_WriteConfig_f() use). Declared because
+// the client writes the renderer choice at selection time: the app is usually
+// swiped away rather than quit, so waiting for shutdown would lose it.
+void		Com_WriteConfigToFile( const char *filename );
 // checks for and removes command line "+set var arg" constructs
 // if match is NULL, all set commands will be executed, otherwise
 // only a set with the exact name.  Only used during startup.

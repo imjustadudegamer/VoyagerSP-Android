@@ -24,6 +24,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "client.h"
 #include "../../sp/sp_ui.h"   // EF1 SP native UI (libefui.so) drive hooks
 #include <limits.h>
+#include <float.h>          // FLT_MAX: the "no upper/lower bound" sentinel, see CL_VK_CvarCheckRange
 
 #include "../sys/sys_local.h"
 #include "../sys/sys_loadlib.h"
@@ -143,6 +144,53 @@ qboolean			cl_oldGameSet;
 refexport_t	re;
 #ifdef USE_RENDERER_DLOPEN
 static void	*rendererLib = NULL;
+
+// Renderer module file name, built from `cl_renderer`.
+//
+// The cvar holds the bare backend name ("vulkan"); the file name is
+// platform-decorated because the two packagers differ:
+//   Linux   : renderer_vulkan.so        -- a plain file in Release/, found by
+//                                          Sys_LoadDll via Sys_BinaryPath()
+//   Android : librenderer_vulkan.so     -- an APK native library; Android's
+//                                          packager only accepts "lib<name>.so"
+//                                          and dlopen()s it by that bare name
+// There is no arch suffix: an APK is already split per ABI under lib/<abi>/, and
+// the desktop Release/ ships one architecture. (EF2's contract is
+// "renderer_<name>"; only the platform decoration differs.)
+#ifdef __ANDROID__
+#define RENDERER_MODULE_NAME "librenderer_"
+#else
+#define RENDERER_MODULE_NAME "renderer_"
+#endif
+#define RENDERER_MODULE_EXT DLL_EXT
+
+// Renderer diagnostics that are NOT part of refexport_t. The client drives
+// Mali/PowerVR GPU-device-loss recovery from the renderer's own lost-device
+// flag, so those three entry points are resolved from the module at load time
+// (they are Q_EXPORTed by renderervk). A renderer that does not provide them
+// simply never reports a lost device; the static build calls them directly.
+static qboolean (*renderer_device_lost)( void );
+static void     (*renderer_clear_device_lost)( void );
+static int      (*renderer_device_lost_report)( char *out, int outSize );
+
+static qboolean CL_VK_DeviceLost( void ) {
+	return renderer_device_lost ? renderer_device_lost() : qfalse;
+}
+static void CL_VK_ClearDeviceLost( void ) {
+	if ( renderer_clear_device_lost )
+		renderer_clear_device_lost();
+}
+static int CL_VK_DeviceLostReport( char *out, int outSize ) {
+	return renderer_device_lost_report ? renderer_device_lost_report( out, outSize ) : 0;
+}
+
+#define vk_device_lost()             CL_VK_DeviceLost()
+#define vk_clear_device_lost()       CL_VK_ClearDeviceLost()
+#define vk_device_lost_report(a, b)  CL_VK_DeviceLostReport( (a), (b) )
+#else
+extern qboolean vk_device_lost( void );
+extern void     vk_clear_device_lost( void );
+extern int      vk_device_lost_report( char *out, int outSize );
 #endif
 
 ping_t	cl_pinglist[MAX_PINGREQUESTS];
@@ -3074,9 +3122,9 @@ CL_Frame
 // window) and build a fresh one, then reload the level so the SP cgame
 // re-registers all its media into the new device. This is why a plain
 // vid_restart is unsafe in SP (stale cgame handles) but this is not -- we reload.
-extern qboolean vk_device_lost( void );
-extern void     vk_clear_device_lost( void );
-extern int      vk_device_lost_report( char *out, int outSize ); // GPU/memory diag snapshot
+//
+// The three vk_device_lost* entry points are declared at the top of this file:
+// extern in a static build, resolved from the renderer module with dlopen.
 extern int      SP_IsActive( void );
 void CL_InitRenderer( void ); // defined below; forward-declared for the recovery driver
 
@@ -3406,6 +3454,11 @@ void CL_ShutdownRef( void ) {
 		Sys_UnloadLibrary( rendererLib );
 		rendererLib = NULL;
 	}
+	// The module's code is gone: drop the resolved diagnostics so a frame that
+	// still asks for the device-loss flag cannot call unmapped code.
+	renderer_device_lost = NULL;
+	renderer_clear_device_lost = NULL;
+	renderer_device_lost_report = NULL;
 #endif
 }
 
@@ -3578,14 +3631,40 @@ static void CL_Stub_SetClipboardBitmap( const byte *bitmap, int size ) { (void)b
 static void CL_Stub_SaveJPG( const char *filename, int q, int w, int h, byte *buf, int pad ) { (void)filename;(void)q;(void)w;(void)h;(void)buf;(void)pad; }
 static size_t CL_Stub_SaveJPGToBuffer( byte *b, size_t bs, int q, int w, int h, byte *ib, int pad ) { (void)b;(void)bs;(void)q;(void)w;(void)h;(void)ib;(void)pad; return 0; }
 #ifdef USE_VULKAN
-// translate Quake3e's string-range Cvar_CheckRange to lilium's float-range one
+// translate Quake3e's string-range Cvar_CheckRange to lilium's float-range one.
+//
+// Quake3e allows a NULL bound to mean "unbounded on that side": renderervk
+// registers r_flareCoeff ("0.1", NULL), r_ext_max_anisotropy ("1", NULL),
+// r_device ("-2", NULL), r_renderWidth ("96", NULL) and r_renderHeight
+// ("72", NULL). lilium's Cvar_CheckRange has no concept of an absent bound --
+// Cvar_Validate() clamps unconditionally against var->min and var->max -- so
+// passing 0 for a NULL bound (what this wrapper used to do) made every one of
+// those cvars fail the range check on first registration: r_flareCoeff's
+// default of 150 is > 0, so it was clamped to 0 ("out of range (max 0)"), and
+// the next check (the renderer restart re-registers and re-runs
+// Cvar_CheckRange -> Cvar_Set) then found 0 < its real minimum and pushed it to
+// 0.1 ("out of range (min 0.100000)"). +/-FLT_MAX is the faithful encoding of
+// Quake3e's open-ended bound: no finite value a user can type is clamped, and
+// the only way to reach the warning branch with the sentinel is a non-finite
+// value, which Q_isanumber() rejects for all practical inputs.
 static void CL_VK_CvarCheckRange( cvar_t *cv, const char *minVal, const char *maxVal, int type ) {
-	Cvar_CheckRange( cv, minVal ? atof(minVal) : 0, maxVal ? atof(maxVal) : 0, type == 2 /*CV_INTEGER*/ );
+	// type is Quake3e's cvarValidator_t: 0 = CV_NONE, 1 = CV_FLOAT,
+	// 2 = CV_INTEGER, 3 = CV_FSPATH (renderervk/tr_local.h:82).
+	// CV_NONE means "no validation"; encode it as the widest float range
+	// rather than leaving the cvar unvalidated (the engine has no un-validate
+	// call, and no renderervk caller uses it today).
+	Cvar_CheckRange( cv,
+		minVal ? atof( minVal ) : -FLT_MAX,
+		maxVal ? atof( maxVal ) :  FLT_MAX,
+		type == 2 );
 }
 #endif
 #ifdef USE_VULKAN
 void  VKimp_Init( glconfig_t *config );
 void  VKimp_Shutdown( qboolean unloadDLL );
+// The window/surface layer runs in the client; hand it the import table it needs
+// (the client's table is local to CL_InitRef, see sdl_glimp.c's VKimp_SetImports).
+void  VKimp_SetImports( const refimport_t *imp );
 void *VK_GetInstanceProcAddr( VkInstance instance, const char *name );
 qboolean VK_CreateSurface( VkInstance instance, VkSurfaceKHR *surface );
 #endif
@@ -3597,6 +3676,182 @@ void GLimp_FrontEndSleep( void );
 void GLimp_WakeRenderer( void *data );
 void GLimp_ShutdownRenderThread( void );
 
+// ---------------------------------------------------------------------------
+// Renderer module discovery (Phase 2)
+//
+// The renderer is dlopen()ed exactly once, in CL_InitRef(), before any UI
+// exists. There is therefore no live renderer switch: `cl_renderer` is a
+// next-launch choice, exactly as in the author's EF2 port. The client publishes
+// which modules are actually installed in `cl_rendererModules` (space
+// separated, ROM) so the UI can show the Renderer row only when there is a
+// real choice, and `setrenderer <name>` is the single write path used by both
+// the video menu and the first-run picker.
+//
+// Keep this table in sync with the module targets in src/CMakeLists.txt.
+// ---------------------------------------------------------------------------
+#ifdef USE_RENDERER_DLOPEN
+static const char *const cl_rendererBackends[] = { "vulkan", "gles3", NULL };
+
+static void CL_RendererModuleFileName( const char *backend, char *out, size_t outSize ) {
+#ifdef __ANDROID__
+	// APK native libraries are named lib<name>.so and opening that bare name is
+	// what the Android dynamic linker resolves in the app's library directory.
+	Com_sprintf( out, outSize, "librenderer_%s.so", backend );
+#else
+	// Release/renderer_<name>.so beside the executable.
+	Com_sprintf( out, outSize, "renderer_%s.so", backend );
+#endif
+}
+
+static qboolean CL_RendererBackendKnown( const char *backend ) {
+	int i;
+
+	for ( i = 0; cl_rendererBackends[i]; i++ ) {
+		if ( !Q_stricmp( cl_rendererBackends[i], backend ) )
+			return qtrue;
+	}
+	return qfalse;
+}
+
+// Is a module installed? Probing is a dlopen+dlclose, not a stat(), because on
+// Android the APK's native library directory is not reachable through
+// Sys_BinaryPath() (it is empty there). A module that exists but cannot be
+// resolved counts as unavailable: that is a broken install, and picking it
+// would only reach the same ERR_FATAL the loader would produce.
+static qboolean CL_RendererModuleLoadable( const char *backend ) {
+	char name[MAX_OSPATH];
+	void *h;
+
+	CL_RendererModuleFileName( backend, name, sizeof( name ) );
+
+	h = Sys_LoadDll( name, qtrue );
+	if ( !h )
+		return qfalse;
+
+	Sys_UnloadLibrary( h );
+	return qtrue;
+}
+
+// "Ready" is a different question from "installed". A module may build and load
+// while its backend is still incomplete; it says so by exporting
+// renderer_backend_ready() == 0 (the Vulkan module returns 1). Only ready
+// modules are offered in the UI -- an incomplete one would load, return NULL
+// from GetRefAPI and silently fall back to Vulkan, which is fine for a
+// developer using `setrenderer` but wrong for a menu row.
+static qboolean CL_RendererModuleReady( const char *backend ) {
+	char name[MAX_OSPATH];
+	void *h;
+	int ( *ready )( void );
+	qboolean result;
+
+	CL_RendererModuleFileName( backend, name, sizeof( name ) );
+
+	h = Sys_LoadDll( name, qtrue );
+	if ( !h )
+		return qfalse;
+
+	ready = (int (*)(void))Sys_LoadFunction( h, "renderer_backend_ready" );
+	result = ( ready && !ready() ) ? qfalse : qtrue;
+
+	Sys_UnloadLibrary( h );
+	return result;
+}
+
+// Fill cl_rendererModules with every backend that is installed AND whose
+// backend is ready. The currently selected backend is always included (it is
+// already loaded and initialized).
+static void CL_PublishRendererModules( void ) {
+	char list[128];
+	int i;
+
+	list[0] = '\0';
+	for ( i = 0; cl_rendererBackends[i]; i++ ) {
+		if ( Q_stricmp( cl_rendererBackends[i], cl_renderer->string ) &&
+		     !CL_RendererModuleReady( cl_rendererBackends[i] ) )
+			continue;
+		if ( list[0] )
+			Q_strcat( list, sizeof( list ), " " );
+		Q_strcat( list, sizeof( list ), cl_rendererBackends[i] );
+	}
+
+	Cvar_Set( "cl_rendererModules", list );
+	Com_Printf( "Renderer modules available: %s\n", list[0] ? list : "(none)" );
+}
+
+/*
+============
+CL_SetRenderer_f
+
+`setrenderer <vulkan|gles3>` -- the one write path for the Renderer row and the
+console. Stores the choice for the NEXT start:
+  * Cvar_Set() is this engine's forced form (Cvar_Set2 with force=qtrue), which
+    bypasses the CVAR_LATCH branch: no latchedString is created, so no menu
+    auto-apply and no vid_restart can turn this into a live switch. A
+    vid_restart would just re-load the module that is already resident.
+  * The config is written immediately: the app is normally swiped away, not
+    quit, so a saved-at-exit cvar would be lost.
+============
+*/
+static void CL_SetRenderer_f( void ) {
+	const char *want;
+
+	if ( Cmd_Argc() != 2 ) {
+		Com_Printf( "Usage: setrenderer <name>   (available: %s)\n",
+			Cvar_VariableString( "cl_rendererModules" ) );
+		return;
+	}
+
+	want = Cmd_Argv( 1 );
+
+	if ( !CL_RendererBackendKnown( want ) || !CL_RendererModuleLoadable( want ) ) {
+		Com_Printf( "%s is not an available renderer (available: %s)\n",
+			want, Cvar_VariableString( "cl_rendererModules" ) );
+		return;
+	}
+
+	if ( !CL_RendererModuleReady( want ) ) {
+		Com_Printf( "NOTE: the %s module is installed but its backend is not ready;\n"
+			"      the game will fall back to \"%s\" at the next start.\n",
+			want, cl_renderer ? cl_renderer->resetString : "vulkan" );
+	}
+
+	if ( !Q_stricmp( Cvar_VariableString( "cl_renderer" ), want ) ) {
+		Com_Printf( "Renderer is already %s.\n", want );
+		return;
+	}
+
+	Cvar_Set( "cl_renderer", want );
+	Com_WriteConfigToFile( Q3CONFIG_CFG );
+	Com_Printf( "Renderer set to %s -- it takes effect the next time the game starts.\n", want );
+}
+#endif // USE_RENDERER_DLOPEN
+
+
+#ifdef USE_RENDERER_DLOPEN
+// Load one renderer module and resolve its GetRefAPI. On any failure the
+// library handle is released again, so a refused fallback attempt does not
+// leave a half-open module behind.
+static qboolean CL_LoadRendererModule( const char *backend, char *dllName, size_t dllNameSize,
+	GetRefAPI_t *outAPI )
+{
+	Com_sprintf( dllName, dllNameSize, RENDERER_MODULE_NAME "%s" RENDERER_MODULE_EXT, backend );
+
+	rendererLib = Sys_LoadDll( dllName, qtrue );
+	if ( !rendererLib )
+		return qfalse;
+
+	*outAPI = (GetRefAPI_t)Sys_LoadFunction( rendererLib, "GetRefAPI" );
+	if ( !*outAPI ) {
+		Com_Printf( "Can't load symbol GetRefAPI: '%s'\n", Sys_LibraryError() );
+		Sys_UnloadLibrary( rendererLib );
+		rendererLib = NULL;
+		return qfalse;
+	}
+
+	return qtrue;
+}
+#endif // USE_RENDERER_DLOPEN
+
 void CL_InitRef( void ) {
 	refimport_t	ri;
 	refexport_t	*ret;
@@ -3607,31 +3862,50 @@ void CL_InitRef( void ) {
 
 	Com_Printf( "----- Initializing Renderer ----\n" );
 
+	// Every import slot the renderer may call is filled below; zero first so a
+	// slot this client does not implement reads as NULL instead of stack
+	// garbage (EF2's CL_InitRef does the same).
+	Com_Memset( &ri, 0, sizeof( ri ) );
+
 #ifdef USE_RENDERER_DLOPEN
-	cl_renderer = Cvar_Get("cl_renderer", "opengl1", CVAR_ARCHIVE | CVAR_LATCH);
+	// Load the selected renderer module. This happens once per renderer start,
+	// before any UI exists, which is why switching renderers is a next-launch
+	// choice: vid_restart re-enters this function and reloads the same module.
+	// "vulkan" is the compiled default (EF2's EF2_DEFAULT_RENDERER is the same
+	// value); the fallbacks below only rescue a bad latched cvar.
+	cl_renderer = Cvar_Get("cl_renderer", "vulkan", CVAR_ARCHIVE | CVAR_LATCH);
 
-	Com_sprintf(dllName, sizeof(dllName), RENDERER_PREFIX "%s_" ARCH_STRING DLL_EXT, cl_renderer->string);
+	// useSystemLib = qtrue: on Android the module is found by its bare
+	// "librenderer_<name>.so" name (the linker searches the app's native library
+	// directory); on Linux the bare name fails and Sys_LoadDll falls through to
+	// Sys_BinaryPath() and fs_basepath, which is where Release/ lives.
+	if ( !CL_LoadRendererModule( cl_renderer->string, dllName, sizeof( dllName ), &GetRefAPI ) ) {
+		Com_Printf( "failed:\n\"%s\"\n", Sys_LibraryError() );
 
-	if(!(rendererLib = Sys_LoadDll(dllName, qfalse)) && strcmp(cl_renderer->string, cl_renderer->resetString))
-	{
-		Com_Printf("failed:\n\"%s\"\n", Sys_LibraryError());
-		Cvar_ForceReset("cl_renderer");
+		if ( !strcmp( cl_renderer->string, cl_renderer->resetString ) )
+			Com_Error( ERR_FATAL, "Failed to load renderer \"%s\"", dllName );
 
-		Com_sprintf(dllName, sizeof(dllName), RENDERER_PREFIX "opengl1_" ARCH_STRING DLL_EXT);
-		rendererLib = Sys_LoadDll(dllName, qfalse);
+		// Installed config names a module that is not there: fall back to the
+		// compiled default, exactly as EF2's CL_InitRef does.
+		Cvar_ForceReset( "cl_renderer" );
+		if ( !CL_LoadRendererModule( cl_renderer->resetString, dllName, sizeof( dllName ), &GetRefAPI ) )
+			Com_Error( ERR_FATAL, "Failed to load renderer \"%s\"", dllName );
 	}
 
-	if(!rendererLib)
-	{
-		Com_Printf("failed:\n\"%s\"\n", Sys_LibraryError());
-		Com_Error(ERR_FATAL, "Failed to load renderer");
-	}
+	// Optional renderer diagnostics (not part of refexport_t): GPU device-loss
+	// recovery is driven from the renderer's own flag. NULL is fine -- a
+	// renderer that does not export them never reports a lost device.
+	renderer_device_lost = (qboolean (*)(void))Sys_LoadFunction( rendererLib, "vk_device_lost" );
+	renderer_clear_device_lost = (void (*)(void))Sys_LoadFunction( rendererLib, "vk_clear_device_lost" );
+	renderer_device_lost_report = (int (*)(char *, int))Sys_LoadFunction( rendererLib, "vk_device_lost_report" );
 
-	GetRefAPI = Sys_LoadFunction(rendererLib, "GetRefAPI");
-	if(!GetRefAPI)
-	{
-		Com_Error(ERR_FATAL, "Can't load symbol GetRefAPI: '%s'",  Sys_LibraryError());
-	}
+#else
+	// Static build: the one renderer that was linked in is the only choice.
+	Cvar_Get( "cl_rendererModules", "vulkan", CVAR_ROM );
+	Cvar_Get( "cl_rendererLoaded", "vulkan", CVAR_ROM );
+	// cl_renderer is not registered in a static build (it has no meaning), but
+	// the UI reads it; publish the compiled-in value.
+	Cvar_Get( "cl_renderer", "vulkan", CVAR_ARCHIVE );
 #endif
 
 	ri.Cmd_AddCommand = Cmd_AddCommand;
@@ -3721,18 +3995,68 @@ void CL_InitRef( void ) {
 	ri.GLimp_WakeRenderer = GLimp_WakeRenderer;
 	ri.GLimp_ShutdownRenderThread = GLimp_ShutdownRenderThread;
 
-	ret = GetRefAPI( REF_API_VERSION, &ri );
+#ifdef USE_VULKAN
+	// Before the renderer can call ri.VKimp_Init -> the client-side window layer.
+	VKimp_SetImports( &ri );
+#endif
+
+	ret = NULL;
+	for ( ;; ) {
+		ret = GetRefAPI( REF_API_VERSION, &ri );
 #ifdef USE_FLEXIBLE_DISPLAY
-	if ( ret ) {
-		re = *ret;
-	} else {
-		// support older renderer API without re.ResizeWindow
-		ret = GetRefAPI( 8, &ri );
 		if ( ret ) {
-			memset( &re, 0, sizeof( re ) );
-			memcpy( &re, ret, sizeof( *ret ) - sizeof( void * ) );
+			re = *ret;
+		} else {
+			// support older renderer API without re.ResizeWindow
+			ret = GetRefAPI( 8, &ri );
+			if ( ret ) {
+				memset( &re, 0, sizeof( re ) );
+				memcpy( &re, ret, sizeof( *ret ) - sizeof( void * ) );
+			}
 		}
+#endif
+		if ( ret )
+			break;
+
+#ifdef USE_RENDERER_DLOPEN
+		// The module loaded, exported GetRefAPI, but refused to initialise
+		// (e.g. an incomplete gles3 backend). Treat that as a failed load:
+		// fall back to the compiled default once and only then fail. This is
+		// what keeps a half-built renderer module from reaching the frame loop.
+		if ( !strcmp( cl_renderer->string, cl_renderer->resetString ) )
+			break;	// fall through to the fatal "Couldn't initialize refresh"
+
+		Com_Printf( "Renderer \"%s\" refused to initialize; falling back to \"%s\".\n",
+			cl_renderer->string, cl_renderer->resetString );
+
+		Sys_UnloadLibrary( rendererLib );
+		rendererLib = NULL;
+		renderer_device_lost = NULL;
+		renderer_clear_device_lost = NULL;
+		renderer_device_lost_report = NULL;
+
+		Cvar_ForceReset( "cl_renderer" );
+		if ( !CL_LoadRendererModule( cl_renderer->resetString, dllName, sizeof( dllName ), &GetRefAPI ) )
+			break;	// fatal below
+		renderer_device_lost = (qboolean (*)(void))Sys_LoadFunction( rendererLib, "vk_device_lost" );
+		renderer_clear_device_lost = (void (*)(void))Sys_LoadFunction( rendererLib, "vk_clear_device_lost" );
+		renderer_device_lost_report = (int (*)(char *, int))Sys_LoadFunction( rendererLib, "vk_device_lost_report" );
+#else
+		// Static renderer: there is no other module to fall back to.
+		break;
+#endif
 	}
+
+#ifdef USE_RENDERER_DLOPEN
+	// Informational, read-only: which backends this installation ships, and
+	// which one is actually resident right now. The SP UI shows its Renderer row
+	// only when cl_rendererModules lists more than one, and draws its "restart
+	// to apply" note when cl_renderer differs from cl_rendererLoaded.
+	Cvar_Get( "cl_rendererModules", "", CVAR_ROM );
+	CL_PublishRendererModules();
+
+	Cvar_Get( "cl_rendererLoaded", "", CVAR_ROM );
+	Cvar_Set( "cl_rendererLoaded", cl_renderer->string );
 #endif
 
 #if defined __USEA3D && defined __A3D_GEOM
@@ -4208,6 +4532,9 @@ void CL_Init( void ) {
 	Cmd_AddCommand ("clientinfo", CL_Clientinfo_f);
 	Cmd_AddCommand ("snd_restart", CL_Snd_Restart_f);
 	Cmd_AddCommand ("vid_restart", CL_Vid_Restart_f);
+#ifdef USE_RENDERER_DLOPEN
+	Cmd_AddCommand ("setrenderer", CL_SetRenderer_f);	// next-launch renderer choice (Renderer row in the video menu)
+#endif
 	Cmd_AddCommand ("disconnect", CL_Disconnect_f);
 	Cmd_AddCommand ("record", CL_Record_f);
 	Cmd_AddCommand ("demo", CL_PlayDemo_f);
