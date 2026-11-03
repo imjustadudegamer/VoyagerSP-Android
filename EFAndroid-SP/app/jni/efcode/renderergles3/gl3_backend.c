@@ -114,23 +114,199 @@ static qboolean			gl3_smp_warned;
 static int				gl3_width, gl3_height;
 static qboolean			gl3_backend_ok;
 
-// The three device-loss entry points are part of the module surface the client
-// resolves with dlsym (see gl_main.c). The GL backend has no device object to
-// lose; a lost EGL context will be reported by the platform layer once context
-// recovery is implemented. They are exported now so the client's pointers are
-// never NULL.
-qboolean vk_device_lost( void ) { return qfalse; }
-void vk_clear_device_lost( void ) { }
+// First-run diagnostics (see LAUNCH-TEST.md).
+static int				gl3_gl_errors;			// errors reported so far (capped)
+static int				gl3_first_frame_checked;
+static qboolean			gl3_context_lost;
+static int				gl3_texture_count;
+static qboolean			gl3_selftest_registered;
+
+// The three device-loss entry points are the module surface the client resolves
+// with dlsym. For GLES the "device lost" condition is a lost GL context, which
+// the error sweep below recognises (GL_CONTEXT_LOST). When it happens the flag
+// is raised; the client's CL_RecoverDeviceLost path then calls re.Shutdown ->
+// RE_Shutdown(REF_UNLOAD_DLL) -> vk_shutdown -> GL3_PlatformShutdown (which
+// destroys the SDL window and its EGL context) and CL_InitRenderer recreates
+// everything through InitOpenGL. That is the EGL context recreation story: SDL
+// owns the EGL context, so the recovery is "tear the SDL context down and let
+// InitOpenGL build a new one", driven by the existing client loop.
+qboolean vk_device_lost( void )
+{
+	return gl3_context_lost;
+}
+
+void vk_clear_device_lost( void )
+{
+	gl3_context_lost = qfalse;
+}
+
 int vk_device_lost_report( char *out, int outSize )
 {
-	if ( out && outSize > 0 )
-		out[0] = '\0';
-	return 0;
+	int n;
+
+	if ( !out || outSize <= 0 )
+		return 0;
+
+	n = Com_sprintf( out, outSize,
+		"renderer       : GLES 3.2 (renderer_gles3)\n"
+		"GL vendor      : %s\n"
+		"GL renderer    : %s\n"
+		"GL version     : %s\n"
+		"context lost   : %s\n"
+		"frame size     : %dx%d\n"
+		"programs       : %d\n"
+		"textures       : %d\n",
+		qglGetString ? (const char *)qglGetString( GL_VENDOR ) : "(null)",
+		qglGetString ? (const char *)qglGetString( GL_RENDERER ) : "(null)",
+		qglGetString ? (const char *)qglGetString( GL_VERSION ) : "(null)",
+		gl3_context_lost ? "yes" : "no",
+		gl3_width, gl3_height, gl3_program_count, gl3_texture_count );
+	return n;
 }
 
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Diagnostics
+//
+// The user is the first person to run this renderer, so every failure must
+// name a source site and the GL error must be visible in the log. GL3_CHECK
+// reports the first errors with file:line and then throttles itself: drivers
+// can repeat the same error every frame and the log is more useful bounded.
+// ---------------------------------------------------------------------------
+
+#define GL3_MAX_GL_ERRORS 16
+
+static const char *GL3_ErrorName( GLenum err )
+{
+	switch ( err ) {
+	case GL_NO_ERROR: return "GL_NO_ERROR";
+	case GL_INVALID_ENUM: return "GL_INVALID_ENUM";
+	case GL_INVALID_VALUE: return "GL_INVALID_VALUE";
+	case GL_INVALID_OPERATION: return "GL_INVALID_OPERATION";
+	case GL_INVALID_FRAMEBUFFER_OPERATION: return "GL_INVALID_FRAMEBUFFER_OPERATION";
+	case GL_OUT_OF_MEMORY: return "GL_OUT_OF_MEMORY";
+	case 0x0507: return "GL_CONTEXT_LOST";	// GL_KHR_robustness / ES 3.2
+	default: return "GL_UNKNOWN_ERROR";
+	}
+}
+
+static void GL3_CheckErrors_( const char *where, const char *file, int line )
+{
+	GLenum err;
+
+	if ( gl3_gl_errors >= GL3_MAX_GL_ERRORS )
+		return;
+
+	while ( ( err = qglGetError() ) != GL_NO_ERROR ) {
+		if ( err == 0x0507 ) {	// GL_CONTEXT_LOST: let the client recover
+			gl3_context_lost = qtrue;
+		}
+		if ( gl3_gl_errors < GL3_MAX_GL_ERRORS ) {
+			ri.Printf( PRINT_WARNING, "GLES3: %s at %s:%i\n", GL3_ErrorName( err ), file, line );
+			gl3_gl_errors++;
+			if ( gl3_gl_errors == GL3_MAX_GL_ERRORS )
+				ri.Printf( PRINT_WARNING, "GLES3: further GL errors suppressed\n" );
+		}
+		(void)where;
+	}
+}
+
+#define GL3_CHECK( where ) GL3_CheckErrors_( ( where ), __FILE__, __LINE__ )
+
+static void GL3_LogGLInfo( void )
+{
+	const char *vendor = qglGetString ? (const char *)qglGetString( GL_VENDOR ) : NULL;
+	const char *renderer = qglGetString ? (const char *)qglGetString( GL_RENDERER ) : NULL;
+	const char *version = qglGetString ? (const char *)qglGetString( GL_VERSION ) : NULL;
+	const char *ext = qglGetString ? (const char *)qglGetString( GL_EXTENSIONS ) : NULL;
+
+	ri.Printf( PRINT_ALL, "GLES3: vendor   : %s\n", vendor ? vendor : "(null)" );
+	ri.Printf( PRINT_ALL, "GLES3: renderer : %s\n", renderer ? renderer : "(null)" );
+	ri.Printf( PRINT_ALL, "GLES3: version  : %s (ES %d.%d)\n",
+		version ? version : "(null)", qglesMajorVersion, qglesMinorVersion );
+	ri.Printf( PRINT_ALL, "GLES3: config   : %dx%d depth=%d stencil=%d multisample=%d (samples=%d) fbo=%d\n",
+		gl3_width, gl3_height, glConfig.depthBits, glConfig.stencilBits,
+		r_ext_multisample ? r_ext_multisample->integer : 0, 1, r_fbo ? r_fbo->integer : 1 );
+	if ( ext ) {
+		char buf[512];
+		Q_strncpyz( buf, ext, sizeof( buf ) );
+		ri.Printf( PRINT_ALL, "GLES3: extensions: %s%s\n", buf,
+			strlen( ext ) >= sizeof( buf ) - 1 ? " ..." : "" );
+	}
+}
+
+/*
+====================
+GL3_SelfTest_f
+
+`gles3_selftest` -- everything this backend can verify without rendering a
+frame: the driver-reported uniform block layout against the C struct, the
+attribute locations the programs were compiled with, the sampler units, the
+framebuffer completeness and the object counts.
+====================
+*/
+static void GL3_SelfTest_f( void )
+{
+	int i;
+
+	ri.Printf( PRINT_ALL, "GLES3 selftest: ---------- begins ----------\n" );
+	GL3_LogGLInfo();
+
+	ri.Printf( PRINT_ALL, "GLES3 selftest: objects: programs=%d textures=%d fbo=%u screenmap_fbo=%u vbo=%u ibo=%u ubo=%u vao=%u\n",
+		gl3_program_count, gl3_texture_count,
+		gl3_main_fbo, gl3_screenmap_fbo, gl3_vbo, gl3_ibo, gl3_ubo, gl3_vao );
+
+	for ( i = 0; i < gl3_program_count; i++ ) {
+		gl3_program_t *p = &gl3_programs[i];
+		ri.Printf( PRINT_ALL, "GLES3 selftest: program %d: type=%d fog=%d id=%u mvp=%d tex=%d/%d/%d fogtex=%d\n",
+			i, p->shader_type, p->fog_stage, p->program, p->loc_mvp,
+			p->loc_texture0, p->loc_texture1, p->loc_texture2, p->loc_fog_texture );
+	}
+
+	// Driver-reported UBO layout vs the C struct the front end fills.
+	if ( gl3_program_count > 0 ) {
+		GLuint prog = gl3_programs[0].program;
+		GLint block_index = -1, data_size = 0, uniform_count = 0;
+		GLint loc;
+
+		GLuint block = qglGetUniformBlockIndex( prog, "UBO" );
+		if ( block != GL_INVALID_INDEX ) {
+			qglGetActiveUniformBlockiv( prog, block, GL_UNIFORM_BLOCK_DATA_SIZE, &data_size );
+			qglGetActiveUniformBlockiv( prog, block, GL_UNIFORM_BLOCK_ACTIVE_UNIFORMS, &uniform_count );
+			block_index = (GLint)block;
+		}
+		ri.Printf( PRINT_ALL, "GLES3 selftest: UBO block=%d data_size=%d expected=%d (delta=%d) uniforms=%d\n",
+			block_index, data_size, (int)sizeof( vkUniform_t ),
+			data_size - (int)sizeof( vkUniform_t ), uniform_count );
+
+		loc = qglGetAttribLocation( prog, "in_position" );
+		ri.Printf( PRINT_ALL, "GLES3 selftest: attrib in_position=%d (expect 0)\n", loc );
+		loc = qglGetAttribLocation( prog, "in_color0" );
+		ri.Printf( PRINT_ALL, "GLES3 selftest: attrib in_color0=%d (expect 1)\n", loc );
+		loc = qglGetAttribLocation( prog, "in_tex_coord0" );
+		ri.Printf( PRINT_ALL, "GLES3 selftest: attrib in_tex_coord0=%d (expect 2)\n", loc );
+		loc = qglGetAttribLocation( prog, "in_normal" );
+		ri.Printf( PRINT_ALL, "GLES3 selftest: attrib in_normal=%d (expect 5 or -1)\n", loc );
+	}
+
+	if ( gl3_main_fbo ) {
+		qglBindFramebuffer( GL_FRAMEBUFFER, gl3_main_fbo );
+		ri.Printf( PRINT_ALL, "GLES3 selftest: main FBO status=%s\n",
+			qglCheckFramebufferStatus( GL_FRAMEBUFFER ) == GL_FRAMEBUFFER_COMPLETE ? "complete" : "INCOMPLETE" );
+	}
+	if ( gl3_screenmap_fbo ) {
+		qglBindFramebuffer( GL_FRAMEBUFFER, gl3_screenmap_fbo );
+		ri.Printf( PRINT_ALL, "GLES3 selftest: screenMap FBO status=%s\n",
+			qglCheckFramebufferStatus( GL_FRAMEBUFFER ) == GL_FRAMEBUFFER_COMPLETE ? "complete" : "INCOMPLETE" );
+	}
+	qglBindFramebuffer( GL_FRAMEBUFFER, 0 );
+
+	GL3_CHECK( "selftest" );
+	ri.Printf( PRINT_ALL, "GLES3 selftest: ---------- ends ----------\n" );
+}
 
 static GLuint GL3_TextureFromDescriptor( VkDescriptorSet descriptor )
 {
@@ -195,7 +371,10 @@ static GLuint GL3_CompileShader( GLenum type, const char *source, const char *de
 	qglGetShaderiv( shader, GL_COMPILE_STATUS, &status );
 	if ( !status ) {
 		qglGetShaderInfoLog( shader, sizeof( log ), NULL, log );
-		ri.Printf( PRINT_WARNING, "GLES3: shader compile failed: %s\n", log );
+		ri.Printf( PRINT_WARNING, "GLES3: shader compile failed (%s)%s%s: %s\n",
+			type == GL_VERTEX_SHADER ? "vertex" : "fragment",
+			defines && defines[0] ? " defines=" : "",
+			defines && defines[0] ? defines : "", log );
 		qglDeleteShader( shader );
 		return 0;
 	}
@@ -946,6 +1125,22 @@ void vk_initialize( void )
 		ri.Cvar_Set( "r_dlightMode", "0" );
 	}
 
+	if ( r_smp->integer ) {
+		// Documented decision: this backend is single-threaded. GLES contexts
+		// are thread-affine and neither VAOs nor FBOs are shared between
+		// contexts, so the engine's r_smp render-thread design (one GL context,
+		// two threads) cannot be made correct without a second shared context
+		// and a VAO/FBO migration scheme. The default configuration ships
+		// r_smp 0, so forcing it here changes nothing for normal use and keeps
+		// the renderer honest instead of racing the context.
+		ri.Printf( PRINT_ALL, "GLES3: r_smp is not supported by this backend (single GL context); forcing r_smp 0\n" );
+		ri.Cvar_Set( "r_smp", "0" );
+	}
+
+	gl3_context_lost = qfalse;
+	gl3_gl_errors = 0;
+	gl3_first_frame_checked = 0;
+
 	vk.cmd = &gl3_cmd;
 	Com_Memset( &gl3_cmd, 0, sizeof( gl3_cmd ) );
 	gl3_cmd.vertex_buffer_ptr = gl3_uniform_stage;
@@ -967,7 +1162,9 @@ void vk_initialize( void )
 	qglBindVertexArray( 0 );
 
 	GL3_CreateTargets();
+	GL3_CHECK( "create targets" );
 	GL3_CreateGammaProgram();
+	GL3_CHECK( "gamma program" );
 
 	// Default GL state the renderer assumes.
 	qglDisable( GL_DEPTH_TEST );
@@ -985,8 +1182,15 @@ void vk_initialize( void )
 	gl3_initialized = qtrue;
 	gl3_backend_ok = qtrue;
 
-	ri.Printf( PRINT_ALL, "GLES3: backend initialized (%dx%d, %s)\n", gl3_width, gl3_height,
-		gl3_gamma_program ? "gamma pass on" : "no gamma pass" );
+	if ( !gl3_selftest_registered ) {
+		gl3_selftest_registered = qtrue;
+		ri.Cmd_AddCommand( "gles3_selftest", GL3_SelfTest_f );
+	}
+
+	GL3_LogGLInfo();
+	ri.Printf( PRINT_ALL, "GLES3: backend initialized (%dx%d, %s, programs=%d)\n",
+		gl3_width, gl3_height, gl3_gamma_program ? "gamma pass on" : "no gamma pass",
+		gl3_program_count );
 }
 
 void vk_init_descriptors( void )
@@ -1117,6 +1321,7 @@ void vk_create_image( image_t *image, int width, int height, int mip_levels )
 	(void)mip_levels;
 
 	qglBindTexture( GL_TEXTURE_2D, 0 );
+	gl3_texture_count++;
 }
 
 void vk_upload_image_data( image_t *image, int x, int y, int width, int height,
@@ -1183,6 +1388,8 @@ void vk_destroy_image_resources( VkImage *image, VkImageView *imageView )
 		tex = (GLuint)(uintptr_t)*image;
 		qglDeleteTextures( 1, &tex );
 		*image = 0;
+		if ( gl3_texture_count > 0 )
+			gl3_texture_count--;
 	}
 	if ( imageView )
 		*imageView = 0;
@@ -1280,6 +1487,17 @@ void vk_clear_depth( qboolean clear_stencil )
 
 // Same command-list peek as the Vulkan backend: the front end flags the first
 // drawSurfs command with needScreenMap and the last with switchRenderPass.
+// ScreenMap pass ordering (the reason for the frame_count guard): the front end
+// emits, per frame, [RC_DRAW_BUFFER, RC_DRAW_SURFS] per view. A mirror-shaped
+// view has needScreenMap on its first drawSurfs command and switchRenderPass on
+// the last. vk_begin_frame() peeks the first command, binds the screenmap
+// target when that flag is set, and later RB_DrawSurfs calls
+// vk_end_render_pass + vk_begin_main_render_pass on switchRenderPass. Every
+// subsequent RC_DRAW_BUFFER in the same frame must NOT re-open or clear a
+// target, which is what the frame_count increment/early-return (and the
+// matching reset in vk_end_frame) enforces -- the same rule as the Vulkan
+// backend. Without it, a portal's second view would wipe the first view's
+// output with a fresh clear.
 static qboolean GL3_FindScreenmapDrawsurfs( void )
 {
 	const void *curCmd = &backEndData->commands.cmds;
@@ -1397,6 +1615,11 @@ void vk_present_frame( void )
 		int dw = gl3_width, dh = gl3_height;
 		GL3_PlatformDrawableSize( &dw, &dh );
 		qglViewport( 0, 0, dw, dh );
+	}
+
+	if ( gl3_first_frame_checked < 60 ) {
+		gl3_first_frame_checked++;
+		GL3_CHECK( "present" );
 	}
 
 	if ( gl3_gamma_program ) {
@@ -1529,9 +1752,25 @@ void vk_bind_lighting( int stage, int bundle )
 	(void)stage; (void)bundle;
 }
 
-// Upload all attributes of one draw into the streaming VBO. The array data is
-// the front end's tessellation arrays (identical to the Vulkan backend's
-// non-VBO path); each attribute occupies a slice of one buffer.
+// Tessellation flags -> vertex attribute set. The front end emits exactly the
+// flags below (see tr_shade.c's tess_flags per stage type); a shader permutation
+// only declares the locations its #ifdefs use, and a pointer for an unused
+// location is harmless. This table is the contract the Vulkan backend's
+// push_bind/push_attr switch encodes:
+//
+//   flags                          locations bound
+//   TESS_XYZ                       0  (vec4 xyz)
+//   TESS_RGBA0                     1  (RGBA8 vertex colour)
+//   TESS_ST0                       2  (vec2)
+//   TESS_ST1                       3  (vec2)
+//   TESS_ST2                       4  (vec2)
+//   TESS_NNN (env lighting)        5  (vec4 normal)
+//   TESS_RGBA1                     6  (RGBA8)
+//   TESS_RGBA2                     7  (RGBA8)
+//
+// 2D/UI stages use TESS_XYZ|TESS_ST0|TESS_RGBA0 and the 2D MVP computed in
+// GL3_DefaultMVP. Colour-only stages use TESS_XYZ (loc 0) and the colour
+// program. The lighting variant binds 0/1/2 in vk_bind_lighting's order.
 static void GL3_BindTessellation( void )
 {
 	uint32_t flags = gl3_geometry_flags;
@@ -1675,11 +1914,17 @@ void vk_draw_geometry( Vk_Depth_Range depth_range, qboolean indexed )
 	GL3_BindTextureUnit( 2, gl3_cmd.descriptor_set.current[VK_DESC_TEXTURE2] );
 
 	if ( def->fog_stage ) {
-		// Index 4 is the fog-collapse slot, index 1 the lighting/fog-only slot.
-		if ( gl3_cmd.descriptor_set.current[VK_DESC_FOG_COLLAPSE] )
-			GL3_BindTextureUnit( 3, gl3_cmd.descriptor_set.current[VK_DESC_FOG_COLLAPSE] );
-		else
+		// Deterministic fog source, not a heuristic: the front end records the
+		// fog image in exactly one slot per path --
+		//   TYPE_FOG_ONLY / lighting (FOG_DLIGHT)  -> VK_DESC_FOG_ONLY   (== 1)
+		//   a fogged stage (fog collapse)          -> VK_DESC_FOG_COLLAPSE (== 4)
+		// -- and the converted GLSL reads it at texture unit 3.
+		if ( def->shader_type == TYPE_FOG_ONLY ||
+		     def->shader_type == TYPE_SIGNLE_TEXTURE_LIGHTING ||
+		     def->shader_type == TYPE_SIGNLE_TEXTURE_LIGHTING_LINEAR )
 			GL3_BindTextureUnit( 3, gl3_cmd.descriptor_set.current[VK_DESC_FOG_ONLY] );
+		else
+			GL3_BindTextureUnit( 3, gl3_cmd.descriptor_set.current[VK_DESC_FOG_COLLAPSE] );
 	}
 
 	if ( prog->loc_mvp >= 0 )
@@ -1814,6 +2059,15 @@ nothing has been executed yet, so the menu must not offer it and GetRefAPI
 */
 Q_EXPORT int renderer_backend_ready( void )
 {
+	// Opt-in test switch without a rebuild: `gles3_forceReady 1` (in the saved
+	// config or on the command line with +set). The client calls this both from
+	// its module probe (where `ri` is not filled yet -- then the default answer
+	// stands) and from GetRefAPI (where it is), so the guard is required.
+	if ( ri.Cvar_Get ) {
+		cvar_t *force = ri.Cvar_Get( "gles3_forceReady", "0", CVAR_ARCHIVE );
+		if ( force && force->integer )
+			return 1;
+	}
 	return 0;
 }
 

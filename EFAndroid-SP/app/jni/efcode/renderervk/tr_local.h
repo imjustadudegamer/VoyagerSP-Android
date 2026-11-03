@@ -23,7 +23,11 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #ifndef TR_LOCAL_H
 #define TR_LOCAL_H
 
+#ifndef USE_GLES3_BACKEND
 #define USE_VBO				// store static world geometry in VBO
+// (GLES module: the dynamic tessellation path is used; the static world VBO is
+// a Vulkan-side optimisation and vk_vbo.c is not part of that module.)
+#endif
 #define USE_FOG_ONLY
 #define USE_FOG_COLLAPSE	// not compatible with legacy dlights
 #if defined (USE_VBO) && !defined(USE_FOG_ONLY)
